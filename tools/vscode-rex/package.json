@@ -2,11 +2,11 @@
   "name": "rex-lang",
   "displayName": "Rex Language",
   "description": "Syntax highlighting and snippets for Rex",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "publisher": "0xh7l",
   "icon": "rex.png",
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^2.0.0"
   },
   "categories": [
     "Programming Languages"

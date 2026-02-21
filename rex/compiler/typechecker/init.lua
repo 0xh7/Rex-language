@@ -1,5 +1,6 @@
 
 
+local ast = require("compiler.ast")
 local Typechecker = {}
 
 local report
@@ -766,8 +767,8 @@ resolve_type = function(ctx, t, type_params, depth)
   return t
 end
 
-local function sig(params, ret, generics)
-  return { params = params, ret = ret, generics = generics }
+local function sig(params, ret, generics, generic_bounds)
+  return { params = params, ret = ret, generics = generics, generic_bounds = generic_bounds }
 end
 
 local builtins = {
@@ -802,6 +803,10 @@ local modules = {
     exists = sig({ type_ref(type_str(), false) }, type_bool()),
     mkdir = sig({ type_ref(type_str(), false) }, type_result(type_bool(), type_str())),
     remove = sig({ type_ref(type_str(), false) }, type_result(type_bool(), type_str())),
+    is_dir = sig({ type_ref(type_str(), false) }, type_bool()),
+    read_dir = sig({ type_ref(type_str(), false) }, type_result(type_vec(type_str()), type_str())),
+    copy = sig({ type_ref(type_str(), false), type_ref(type_str(), false) }, type_result(type_bool(), type_str())),
+    move = sig({ type_ref(type_str(), false), type_ref(type_str(), false) }, type_result(type_bool(), type_str())),
   },
   thread = {
     channel = builtins.channel,
@@ -828,6 +833,7 @@ local modules = {
   math = {
     sqrt = sig({ type_num() }, type_num()),
     abs = sig({ type_num() }, type_num()),
+    eval = sig({ type_ref(type_str(), false) }, type_result(type_num(), type_str())),
   },
   collections = {
     vec_new = sig({}, type_vec(type_var("T")), { "T" }),
@@ -853,8 +859,36 @@ local modules = {
     set_remove = sig({ type_ref(type_set(type_var("T")), true), type_var("T") }, type_bool(), { "T" }),
   },
   os = {
-    getenv = sig({ type_ref(type_str(), false) }, type_str()),
+    getenv = sig({ type_ref(type_str(), false) }, type_any()),
     cwd = sig({}, type_str()),
+    platform = sig({}, type_str()),
+    args = sig({}, type_vec(type_str())),
+    home = sig({}, type_any()),
+    temp_dir = sig({}, type_str()),
+  },
+  path = {
+    join = sig({ type_ref(type_str(), false), type_ref(type_str(), false) }, type_str()),
+    basename = sig({ type_ref(type_str(), false) }, type_str()),
+    dirname = sig({ type_ref(type_str(), false) }, type_str()),
+    ext = sig({ type_ref(type_str(), false) }, type_str()),
+    stem = sig({ type_ref(type_str(), false) }, type_str()),
+    is_abs = sig({ type_ref(type_str(), false) }, type_bool()),
+  },
+  audio = {
+    play = sig({ type_ref(type_str(), false) }, type_bool()),
+    play_loop = sig({ type_ref(type_str(), false) }, type_bool()),
+    stop = sig({}, type_void()),
+    supports = sig({ type_ref(type_str(), false) }, type_bool()),
+    set_volume = sig({ type_num() }, type_void()),
+    volume = sig({}, type_num()),
+  },
+  log = {
+    debug = sig({ type_any() }, type_void()),
+    info = sig({ type_any() }, type_void()),
+    warn = sig({ type_any() }, type_void()),
+    error = sig({ type_any() }, type_void()),
+    set_level = sig({ type_any() }, type_void()),
+    level = sig({}, type_num()),
   },
   net = {
     tcp_connect = sig({ type_ref(type_str(), false) }, type_result(type_str(), type_str())),
@@ -891,13 +925,23 @@ local modules = {
     key_space = sig({}, type_bool()),
     key_up = sig({}, type_bool()),
     key_down = sig({}, type_bool()),
+    key_code = sig({ type_any() }, type_num()),
+    key_is_down = sig({ type_any() }, type_bool()),
+    key_pressed = sig({ type_any() }, type_bool()),
+    key_released = sig({ type_any() }, type_bool()),
     mouse_x = sig({}, type_num()),
     mouse_y = sig({}, type_num()),
     mouse_down = sig({}, type_bool()),
     mouse_pressed = sig({}, type_bool()),
     mouse_released = sig({}, type_bool()),
+    mouse_is_down = sig({ type_any() }, type_bool()),
+    mouse_pressed_btn = sig({ type_any() }, type_bool()),
+    mouse_released_btn = sig({ type_any() }, type_bool()),
+    scroll_x = sig({}, type_num()),
+    scroll_y = sig({}, type_num()),
     label = sig({ type_any() }, type_void()),
     text = sig({ type_num(), type_num(), type_any(), type_any() }, type_void()),
+    rect = sig({ type_num(), type_num(), type_num(), type_num(), type_any() }, type_void()),
     button = sig({ type_any() }, type_bool()),
     checkbox = sig({ type_any(), type_bool() }, type_bool()),
     radio = sig({ type_any(), type_bool() }, type_bool()),
@@ -930,6 +974,7 @@ local modules = {
     image_w = sig({ type_any() }, type_num()),
     image_h = sig({ type_any() }, type_num()),
     image = sig({ type_any(), type_num(), type_num() }, type_void()),
+    image_rot = sig({ type_any(), type_num(), type_num(), type_num() }, type_void()),
     image_region = sig({ type_any(), type_num(), type_num(), type_num(), type_num(), type_num(), type_num(), type_num(), type_num() }, type_void()),
     play_sound = sig({ type_any() }, type_bool()),
   },
@@ -1433,8 +1478,11 @@ end
 
 local function infer_arg_type(ctx, expected, arg, where)
   if expected and expected.kind == "ref" and arg.kind == "Identifier" then
-    report(ctx, (where or "argument") .. " expects " .. type_to_string(expected) .. "; use &")
     local info = scope_get(ctx, arg.name)
+    if info and info.type and info.type.kind == "ref" then
+      return info.type
+    end
+    report(ctx, (where or "argument") .. " expects " .. type_to_string(expected) .. "; use &")
     if info then
       return info.type
     end
@@ -1446,6 +1494,8 @@ end
 local function apply_signature(ctx, sig, args, type_args)
   local param_map = {}
   local generics = sig.generics or {}
+  local prev_bounds = ctx.generic_bounds
+  ctx.generic_bounds = sig.generic_bounds
   if type_args and #type_args > 0 and #generics == 0 then
     report(ctx, "Type arguments provided for non-generic function")
   end
@@ -1476,7 +1526,9 @@ local function apply_signature(ctx, sig, args, type_args)
       end
     end
   end
-  return resolve_type(ctx, sig.ret, param_map)
+  local resolved = resolve_type(ctx, sig.ret, param_map)
+  ctx.generic_bounds = prev_bounds
+  return resolved
 end
 
 local function infer_result_literal(ctx, expr, expected, where)
@@ -1672,13 +1724,17 @@ infer_expr = function(ctx, expr)
       expect_numeric(ctx, idx, "Vector index")
       return obj.elem
     elseif obj.kind == "map" then
+      if not type_assignable(obj.key, idx) then
+        report(ctx, "Map key expects " .. type_to_string(obj.key) .. ", got " .. type_to_string(idx))
+      end
       return obj.value
     elseif obj.kind == "str" then
+      expect_numeric(ctx, idx, "String index")
       return type_str()
     elseif obj.kind == "unknown" or obj.kind == "any" then
       return type_unknown()
     end
-    report(ctx, "Indexing expects vector or map")
+    report(ctx, "Indexing expects vector, map, or string")
     return type_unknown()
   elseif expr.kind == "Slice" then
     local obj = nil
@@ -1694,6 +1750,12 @@ infer_expr = function(ctx, expr)
     end
     if not obj then
       obj = expect_value(ctx, infer_expr(ctx, expr.object), "slice object")
+    end
+    local slice_start = expect_value(ctx, infer_expr(ctx, expr.start), "slice start")
+    expect_numeric(ctx, slice_start, "Slice start")
+    if expr.finish then
+      local slice_end = expect_value(ctx, infer_expr(ctx, expr.finish), "slice end")
+      expect_numeric(ctx, slice_end, "Slice end")
     end
     if obj.kind == "vec" then
       return type_vec(obj.elem)
@@ -1835,6 +1897,8 @@ infer_call = function(ctx, expr)
         local sig = method.sig
         local generics = sig.generics or {}
         local param_map = {}
+        local prev_bounds = ctx.generic_bounds
+        ctx.generic_bounds = sig.generic_bounds
         if type_args and #type_args > 0 and #generics == 0 then
           report(ctx, "Type arguments provided for non-generic method")
         end
@@ -1886,7 +1950,9 @@ infer_call = function(ctx, expr)
             end
           end
         end
-        return resolve_type(ctx, sig.ret, param_map)
+        local resolved = resolve_type(ctx, sig.ret, param_map)
+        ctx.generic_bounds = prev_bounds
+        return resolved
       end
     end
     report(ctx, "Unknown call target")
@@ -2641,12 +2707,14 @@ check_block = function(ctx, block, new_scope)
   end
 end
 
-local function check_function(ctx, fn, self_type, generic_names)
+local function check_function(ctx, fn, self_type, generic_names, generic_bounds)
   scope_push(ctx)
   own_scope_push(ctx)
   local prev_func = ctx.current_func
   local prev_ret = ctx.return_type
+  local prev_bounds = ctx.generic_bounds
   ctx.current_func = fn.name or "<anon>"
+  ctx.generic_bounds = generic_bounds
   local generic_set = {}
   for _, name in ipairs(generic_names or {}) do
     generic_set[name] = true
@@ -2676,6 +2744,7 @@ local function check_function(ctx, fn, self_type, generic_names)
   check_block(ctx, fn.body, false)
   ctx.current_func = prev_func
   ctx.return_type = prev_ret
+  ctx.generic_bounds = prev_bounds
   own_scope_pop(ctx)
   scope_pop(ctx)
 end
@@ -2700,9 +2769,57 @@ local function merge_generics(ctx, a, b)
   return list
 end
 
+local function copy_bounds_map(src)
+  if not src then
+    return nil
+  end
+  local out = {}
+  for name, bounds in pairs(src) do
+    if type(bounds) == "table" then
+      local copied = {}
+      for i, bound in ipairs(bounds) do
+        copied[i] = bound
+      end
+      out[name] = copied
+    end
+  end
+  if next(out) == nil then
+    return nil
+  end
+  return out
+end
+
+local function collect_type_params(raw_params, explicit_bounds)
+  local names, inline_bounds = ast.normalize_type_params(raw_params)
+  local merged = copy_bounds_map(inline_bounds)
+  local explicit = copy_bounds_map(explicit_bounds)
+  if explicit then
+    merged = merged or {}
+    for name, bounds in pairs(explicit) do
+      merged[name] = bounds
+    end
+  end
+  return names or {}, merged
+end
+
+local function merge_generic_bounds(a, b)
+  local out = copy_bounds_map(a) or {}
+  local right = copy_bounds_map(b)
+  if right then
+    for name, bounds in pairs(right) do
+      out[name] = bounds
+    end
+  end
+  if next(out) == nil then
+    return nil
+  end
+  return out
+end
+
 local function build_self_type(ctx, item)
   local args = {}
-  for _, name in ipairs(item.params or {}) do
+  local params = collect_type_params(item.params, item.param_bounds)
+  for _, name in ipairs(params) do
     table.insert(args, type_var(name))
   end
   if ctx.structs[item.name] then
@@ -2748,8 +2865,9 @@ function Typechecker.check(ast)
 
   for _, item in ipairs(ast.items or {}) do
     if item.kind == "Struct" then
+      local params, param_bounds = collect_type_params(item.params, item.param_bounds)
       local param_set = {}
-      for _, name in ipairs(item.params or {}) do
+      for _, name in ipairs(params) do
         param_set[name] = true
       end
       local field_list = {}
@@ -2758,10 +2876,11 @@ function Typechecker.check(ast)
         ftype = convert_type_vars(ftype, param_set)
         table.insert(field_list, { name = field.name, type = ftype })
       end
-      ctx.structs[item.name] = { params = item.params or {}, field_list = field_list }
+      ctx.structs[item.name] = { params = params, param_bounds = param_bounds, field_list = field_list }
     elseif item.kind == "Enum" then
+      local params, param_bounds = collect_type_params(item.params, item.param_bounds)
       local param_set = {}
-      for _, name in ipairs(item.params or {}) do
+      for _, name in ipairs(params) do
         param_set[name] = true
       end
       local variants = {}
@@ -2777,7 +2896,7 @@ function Typechecker.check(ast)
         end
         table.insert(variants, { name = variant.name, types = types })
       end
-      ctx.enums[item.name] = { params = item.params or {}, variants = variants }
+      ctx.enums[item.name] = { params = params, param_bounds = param_bounds, variants = variants }
     elseif item.kind == "TypeAlias" then
       ctx.aliases[item.name] = parse_type_string(item.aliased)
     end
@@ -2792,7 +2911,7 @@ function Typechecker.check(ast)
 
   for _, item in ipairs(ast.items or {}) do
     if item.kind == "Function" then
-      local generics = item.type_params or {}
+      local generics, generic_bounds = collect_type_params(item.type_params, item.type_param_bounds)
       local generic_set = {}
       for _, name in ipairs(generics) do
         generic_set[name] = true
@@ -2811,13 +2930,15 @@ function Typechecker.check(ast)
       local ret = item.return_type and parse_type_string(item.return_type) or type_void()
       ret = convert_type_vars(ret, generic_set)
       ret = resolve_type(ctx, ret, nil)
-      ctx.functions[item.name] = sig(params, ret, generics)
+      ctx.functions[item.name] = sig(params, ret, generics, generic_bounds)
     elseif item.kind == "Impl" then
       ctx.methods[item.name] = ctx.methods[item.name] or {}
       local self_type = build_self_type(ctx, item)
-      local impl_generics = item.params or {}
+      local impl_generics, impl_bounds = collect_type_params(item.params, item.param_bounds)
       for _, method in ipairs(item.methods or {}) do
-        local generics = merge_generics(ctx, impl_generics, method.type_params or {})
+        local method_generics, method_bounds = collect_type_params(method.type_params, method.type_param_bounds)
+        local generics = merge_generics(ctx, impl_generics, method_generics)
+        local generic_bounds = merge_generic_bounds(impl_bounds, method_bounds)
         local generic_set = {}
         for _, name in ipairs(generics) do
           generic_set[name] = true
@@ -2845,20 +2966,26 @@ function Typechecker.check(ast)
         local ret = method.return_type and parse_type_string(method.return_type) or type_void()
         ret = convert_type_vars(ret, generic_set)
         ret = resolve_type(ctx, ret, nil)
-        ctx.methods[item.name][method.name] = { sig = sig(params, ret, generics), has_self = has_self }
+        ctx.methods[item.name][method.name] = {
+          sig = sig(params, ret, generics, generic_bounds),
+          has_self = has_self,
+        }
       end
     end
   end
 
   for _, item in ipairs(ast.items or {}) do
     if item.kind == "Function" then
-      check_function(ctx, item, nil, item.type_params or {})
+      local generics, generic_bounds = collect_type_params(item.type_params, item.type_param_bounds)
+      check_function(ctx, item, nil, generics, generic_bounds)
     elseif item.kind == "Impl" then
       local self_type = build_self_type(ctx, item)
-      local impl_generics = item.params or {}
+      local impl_generics, impl_bounds = collect_type_params(item.params, item.param_bounds)
       for _, method in ipairs(item.methods or {}) do
-        local generics = merge_generics(ctx, impl_generics, method.type_params or {})
-        check_function(ctx, method, self_type, generics)
+        local method_generics, method_bounds = collect_type_params(method.type_params, method.type_param_bounds)
+        local generics = merge_generics(ctx, impl_generics, method_generics)
+        local generic_bounds = merge_generic_bounds(impl_bounds, method_bounds)
+        check_function(ctx, method, self_type, generics, generic_bounds)
       end
     elseif item.kind == "Struct" or item.kind == "Enum" or item.kind == "Use" or item.kind == "TypeAlias" then
      

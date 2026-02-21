@@ -149,7 +149,7 @@ end
 
 function Parser:parse_type_params()
   if not self:match("<") then
-    return nil
+    return nil, nil
   end
   local params = {}
   if not self:match(">") then
@@ -167,12 +167,12 @@ function Parser:parse_type_params()
     until not self:match(",")
     self:expect(">")
   end
-  return params
+  return ast.normalize_type_params(params)
 end
 
 function Parser:parse_struct()
   local name = self:expect_kind("ident").value
-  local params = self:parse_type_params()
+  local params, param_bounds = self:parse_type_params()
   self:expect("{")
   local fields = {}
   while not self:match("}") do
@@ -184,7 +184,7 @@ function Parser:parse_struct()
     table.insert(fields, { name = field, type = ftype })
     self:match(",")
   end
-  return ast.node("Struct", { name = name, params = params, fields = fields })
+  return ast.node("Struct", { name = name, params = params, param_bounds = param_bounds, fields = fields })
 end
 
 function Parser:parse_type_alias()
@@ -197,7 +197,7 @@ end
 
 function Parser:parse_enum()
   local name = self:expect_kind("ident").value
-  local params = self:parse_type_params()
+  local params, param_bounds = self:parse_type_params()
   self:expect("{")
   local variants = {}
   while not self:match("}") do
@@ -218,12 +218,12 @@ function Parser:parse_enum()
   if #variants == 0 then
     self:error("Enum must have at least one variant")
   end
-  return ast.node("Enum", { name = name, params = params, variants = variants })
+  return ast.node("Enum", { name = name, params = params, param_bounds = param_bounds, variants = variants })
 end
 
 function Parser:parse_impl()
   local name = self:expect_kind("ident").value
-  local params = self:parse_type_params()
+  local params, param_bounds = self:parse_type_params()
   self:expect("{")
   local methods = {}
   while not self:match("}") do
@@ -233,12 +233,12 @@ function Parser:parse_impl()
       self:error("Expected fn in impl block")
     end
   end
-  return ast.node("Impl", { name = name, params = params, methods = methods })
+  return ast.node("Impl", { name = name, params = params, param_bounds = param_bounds, methods = methods })
 end
 
 function Parser:parse_function(is_method)
   local name = self:expect_kind("ident").value
-  local type_params = self:parse_type_params()
+  local type_params, type_param_bounds = self:parse_type_params()
   self:expect("(")
   local params = {}
   if not self:match(")") then
@@ -255,6 +255,7 @@ function Parser:parse_function(is_method)
   return ast.node("Function", {
     name = name,
     type_params = type_params,
+    type_param_bounds = type_param_bounds,
     params = params,
     return_type = return_type,
     body = body,

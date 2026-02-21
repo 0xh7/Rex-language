@@ -8,6 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef Button6
+#define Button6 6
+#endif
+
+#ifndef Button7
+#define Button7 7
+#endif
+
 static Display* ui_display = NULL;
 static Window ui_window = 0;
 static GC ui_gc;
@@ -22,7 +30,10 @@ static XImage* ui_image = NULL;
 static int ui_img_w = 0;
 static int ui_img_h = 0;
 static int ui_img_owns = 0;
+static int ui_scroll_x = 0;
 static int ui_scroll_y = 0;
+static int ui_key_states[REX_UI_KEY_MAX];
+static int ui_mouse_buttons[REX_UI_MOUSE_BUTTONS];
 static int ui_key_tab = 0;
 static int ui_key_enter = 0;
 static int ui_key_space = 0;
@@ -74,6 +85,119 @@ static void ui_clear_key_state(void) {
   ui_key_end = 0;
   ui_key_ctrl = 0;
   ui_key_shift = 0;
+  memset(ui_key_states, 0, sizeof(ui_key_states));
+  memset(ui_mouse_buttons, 0, sizeof(ui_mouse_buttons));
+  ui_mouse_down = 0;
+}
+
+static int ui_keycode_from_keysym(KeySym sym) {
+  if (sym >= XK_A && sym <= XK_Z) {
+    return (int)sym;
+  }
+  if (sym >= XK_a && sym <= XK_z) {
+    return (int)(sym - XK_a + 'A');
+  }
+  if (sym >= XK_0 && sym <= XK_9) {
+    return (int)sym;
+  }
+  switch (sym) {
+    case XK_Escape: return REX_KEY_ESCAPE;
+    case XK_Return: return REX_KEY_ENTER;
+    case XK_Tab:
+    case XK_ISO_Left_Tab: return REX_KEY_TAB;
+    case XK_space: return REX_KEY_SPACE;
+    case XK_BackSpace: return REX_KEY_BACKSPACE;
+    case XK_Insert: return REX_KEY_INSERT;
+    case XK_Delete: return REX_KEY_DELETE;
+    case XK_Right: return REX_KEY_RIGHT;
+    case XK_Left: return REX_KEY_LEFT;
+    case XK_Down: return REX_KEY_DOWN;
+    case XK_Up: return REX_KEY_UP;
+    case XK_Page_Up: return REX_KEY_PAGE_UP;
+    case XK_Page_Down: return REX_KEY_PAGE_DOWN;
+    case XK_Home: return REX_KEY_HOME;
+    case XK_End: return REX_KEY_END;
+    case XK_Caps_Lock: return REX_KEY_CAPS_LOCK;
+    case XK_Scroll_Lock: return REX_KEY_SCROLL_LOCK;
+    case XK_Num_Lock: return REX_KEY_NUM_LOCK;
+    case XK_Print: return REX_KEY_PRINT_SCREEN;
+    case XK_Pause: return REX_KEY_PAUSE;
+    case XK_F1: return REX_KEY_F1;
+    case XK_F2: return REX_KEY_F2;
+    case XK_F3: return REX_KEY_F3;
+    case XK_F4: return REX_KEY_F4;
+    case XK_F5: return REX_KEY_F5;
+    case XK_F6: return REX_KEY_F6;
+    case XK_F7: return REX_KEY_F7;
+    case XK_F8: return REX_KEY_F8;
+    case XK_F9: return REX_KEY_F9;
+    case XK_F10: return REX_KEY_F10;
+    case XK_F11: return REX_KEY_F11;
+    case XK_F12: return REX_KEY_F12;
+    case XK_F13: return REX_KEY_F13;
+    case XK_F14: return REX_KEY_F14;
+    case XK_F15: return REX_KEY_F15;
+    case XK_F16: return REX_KEY_F16;
+    case XK_F17: return REX_KEY_F17;
+    case XK_F18: return REX_KEY_F18;
+    case XK_F19: return REX_KEY_F19;
+    case XK_F20: return REX_KEY_F20;
+    case XK_F21: return REX_KEY_F21;
+    case XK_F22: return REX_KEY_F22;
+    case XK_F23: return REX_KEY_F23;
+    case XK_F24: return REX_KEY_F24;
+    case XK_F25: return REX_KEY_F25;
+    case XK_KP_0: return REX_KEY_KP_0;
+    case XK_KP_1: return REX_KEY_KP_1;
+    case XK_KP_2: return REX_KEY_KP_2;
+    case XK_KP_3: return REX_KEY_KP_3;
+    case XK_KP_4: return REX_KEY_KP_4;
+    case XK_KP_5: return REX_KEY_KP_5;
+    case XK_KP_6: return REX_KEY_KP_6;
+    case XK_KP_7: return REX_KEY_KP_7;
+    case XK_KP_8: return REX_KEY_KP_8;
+    case XK_KP_9: return REX_KEY_KP_9;
+    case XK_KP_Decimal: return REX_KEY_KP_DECIMAL;
+    case XK_KP_Divide: return REX_KEY_KP_DIVIDE;
+    case XK_KP_Multiply: return REX_KEY_KP_MULTIPLY;
+    case XK_KP_Subtract: return REX_KEY_KP_SUBTRACT;
+    case XK_KP_Add: return REX_KEY_KP_ADD;
+    case XK_KP_Enter: return REX_KEY_KP_ENTER;
+    case XK_KP_Equal: return REX_KEY_KP_EQUAL;
+    case XK_Shift_L: return REX_KEY_LEFT_SHIFT;
+    case XK_Shift_R: return REX_KEY_RIGHT_SHIFT;
+    case XK_Control_L: return REX_KEY_LEFT_CONTROL;
+    case XK_Control_R: return REX_KEY_RIGHT_CONTROL;
+    case XK_Alt_L: return REX_KEY_LEFT_ALT;
+    case XK_Alt_R: return REX_KEY_RIGHT_ALT;
+    case XK_Super_L: return REX_KEY_LEFT_SUPER;
+    case XK_Super_R: return REX_KEY_RIGHT_SUPER;
+    case XK_Menu: return REX_KEY_MENU;
+    case XK_minus: return REX_KEY_MINUS;
+    case XK_underscore: return REX_KEY_MINUS;
+    case XK_equal: return REX_KEY_EQUAL;
+    case XK_plus: return REX_KEY_EQUAL;
+    case XK_bracketleft: return REX_KEY_LEFT_BRACKET;
+    case XK_braceleft: return REX_KEY_LEFT_BRACKET;
+    case XK_bracketright: return REX_KEY_RIGHT_BRACKET;
+    case XK_braceright: return REX_KEY_RIGHT_BRACKET;
+    case XK_backslash: return REX_KEY_BACKSLASH;
+    case XK_bar: return REX_KEY_BACKSLASH;
+    case XK_semicolon: return REX_KEY_SEMICOLON;
+    case XK_colon: return REX_KEY_SEMICOLON;
+    case XK_apostrophe: return REX_KEY_APOSTROPHE;
+    case XK_quotedbl: return REX_KEY_APOSTROPHE;
+    case XK_grave: return REX_KEY_GRAVE_ACCENT;
+    case XK_asciitilde: return REX_KEY_GRAVE_ACCENT;
+    case XK_comma: return REX_KEY_COMMA;
+    case XK_less: return REX_KEY_COMMA;
+    case XK_period: return REX_KEY_PERIOD;
+    case XK_greater: return REX_KEY_PERIOD;
+    case XK_slash: return REX_KEY_SLASH;
+    case XK_question: return REX_KEY_SLASH;
+    default: break;
+  }
+  return REX_KEY_UNKNOWN;
 }
 
 static int ui_mask_shift(unsigned long mask) {
@@ -173,6 +297,7 @@ void rex_ui_platform_shutdown(void) {
 
 int rex_ui_platform_poll(RexUIPlatformInput* input) {
   ui_text_len = 0;
+  ui_scroll_x = 0;
   ui_scroll_y = 0;
   ui_key_copy = 0;
   ui_key_paste = 0;
@@ -209,21 +334,39 @@ int rex_ui_platform_poll(RexUIPlatformInput* input) {
       case ButtonPress:
         if (ev.xbutton.button == Button1) {
           ui_mouse_down = 1;
+          ui_mouse_buttons[REX_MOUSE_LEFT] = 1;
+        } else if (ev.xbutton.button == Button2) {
+          ui_mouse_buttons[REX_MOUSE_MIDDLE] = 1;
+        } else if (ev.xbutton.button == Button3) {
+          ui_mouse_buttons[REX_MOUSE_RIGHT] = 1;
         } else if (ev.xbutton.button == Button4) {
           ui_scroll_y += 1;
         } else if (ev.xbutton.button == Button5) {
           ui_scroll_y -= 1;
+        } else if (ev.xbutton.button == Button6) {
+          ui_scroll_x -= 1;
+        } else if (ev.xbutton.button == Button7) {
+          ui_scroll_x += 1;
         }
         break;
       case ButtonRelease:
         if (ev.xbutton.button == Button1) {
           ui_mouse_down = 0;
+          ui_mouse_buttons[REX_MOUSE_LEFT] = 0;
+        } else if (ev.xbutton.button == Button2) {
+          ui_mouse_buttons[REX_MOUSE_MIDDLE] = 0;
+        } else if (ev.xbutton.button == Button3) {
+          ui_mouse_buttons[REX_MOUSE_RIGHT] = 0;
         }
         break;
       case KeyPress: {
         char buf[8];
         KeySym sym = 0;
         int len = XLookupString(&ev.xkey, buf, sizeof(buf), &sym, NULL);
+        int code = ui_keycode_from_keysym(sym);
+        if (code >= 0 && code < REX_UI_KEY_MAX) {
+          ui_key_states[code] = 1;
+        }
         switch (sym) {
           case XK_Tab: ui_key_tab = 1; break;
           case XK_Return: ui_key_enter = 1; break;
@@ -262,6 +405,10 @@ int rex_ui_platform_poll(RexUIPlatformInput* input) {
       }
       case KeyRelease: {
         KeySym sym = XLookupKeysym(&ev.xkey, 0);
+        int code = ui_keycode_from_keysym(sym);
+        if (code >= 0 && code < REX_UI_KEY_MAX) {
+          ui_key_states[code] = 0;
+        }
         switch (sym) {
           case XK_Tab: ui_key_tab = 0; break;
           case XK_Return: ui_key_enter = 0; break;
@@ -297,7 +444,12 @@ int rex_ui_platform_poll(RexUIPlatformInput* input) {
   input->mouse_x = ui_mouse_x;
   input->mouse_y = ui_mouse_y;
   input->mouse_down = ui_mouse_down;
+  for (int i = 0; i < REX_UI_MOUSE_BUTTONS; i++) {
+    input->mouse_buttons[i] = ui_mouse_buttons[i];
+  }
+  input->scroll_x = ui_scroll_x;
   input->scroll_y = ui_scroll_y;
+  memcpy(input->key_states, ui_key_states, sizeof(ui_key_states));
   input->key_tab = ui_key_tab;
   input->key_enter = ui_key_enter;
   input->key_space = ui_key_space;

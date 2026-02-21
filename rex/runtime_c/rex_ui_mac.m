@@ -1,6 +1,7 @@
 #if defined(__APPLE__)
 
 #import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h>
 #include "rex_ui.h"
 #include <string.h>
 
@@ -16,7 +17,10 @@ static int ui_text_len = 0;
 static int ui_width = 0;
 static int ui_height = 0;
 static const uint32_t* ui_pixels = NULL;
+static int ui_scroll_x = 0;
 static int ui_scroll_y = 0;
+static int ui_key_states[REX_UI_KEY_MAX];
+static int ui_mouse_buttons[REX_UI_MOUSE_BUTTONS];
 static int ui_key_tab = 0;
 static int ui_key_enter = 0;
 static int ui_key_space = 0;
@@ -82,6 +86,127 @@ static void ui_update_modifiers(NSEventModifierFlags mods) {
   ui_key_shift = (mods & NSEventModifierFlagShift) != 0;
 }
 
+static int ui_keycode_from_char(unichar c) {
+  if (c >= 'a' && c <= 'z') {
+    return (int)(c - 'a' + 'A');
+  }
+  if (c >= 'A' && c <= 'Z') {
+    return (int)c;
+  }
+  if (c >= '0' && c <= '9') {
+    return (int)c;
+  }
+  switch (c) {
+    case ' ': return REX_KEY_SPACE;
+    case '\t': return REX_KEY_TAB;
+    case '\r': return REX_KEY_ENTER;
+    case 27: return REX_KEY_ESCAPE;
+    case NSBackspaceCharacter: return REX_KEY_BACKSPACE;
+    case NSDeleteCharacter: return REX_KEY_DELETE;
+    case NSLeftArrowFunctionKey: return REX_KEY_LEFT;
+    case NSRightArrowFunctionKey: return REX_KEY_RIGHT;
+    case NSUpArrowFunctionKey: return REX_KEY_UP;
+    case NSDownArrowFunctionKey: return REX_KEY_DOWN;
+    case NSHomeFunctionKey: return REX_KEY_HOME;
+    case NSEndFunctionKey: return REX_KEY_END;
+    case NSPageUpFunctionKey: return REX_KEY_PAGE_UP;
+    case NSPageDownFunctionKey: return REX_KEY_PAGE_DOWN;
+    case '\'': return REX_KEY_APOSTROPHE;
+    case '"': return REX_KEY_APOSTROPHE;
+    case ',': return REX_KEY_COMMA;
+    case '<': return REX_KEY_COMMA;
+    case '-': return REX_KEY_MINUS;
+    case '_': return REX_KEY_MINUS;
+    case '.': return REX_KEY_PERIOD;
+    case '>': return REX_KEY_PERIOD;
+    case '/': return REX_KEY_SLASH;
+    case '?': return REX_KEY_SLASH;
+    case ';': return REX_KEY_SEMICOLON;
+    case ':': return REX_KEY_SEMICOLON;
+    case '=': return REX_KEY_EQUAL;
+    case '+': return REX_KEY_EQUAL;
+    case '[': return REX_KEY_LEFT_BRACKET;
+    case '{': return REX_KEY_LEFT_BRACKET;
+    case '\\': return REX_KEY_BACKSLASH;
+    case '|': return REX_KEY_BACKSLASH;
+    case ']': return REX_KEY_RIGHT_BRACKET;
+    case '}': return REX_KEY_RIGHT_BRACKET;
+    case '`': return REX_KEY_GRAVE_ACCENT;
+    case '~': return REX_KEY_GRAVE_ACCENT;
+    default: break;
+  }
+  return REX_KEY_UNKNOWN;
+}
+
+static int ui_keycode_from_keycode(unsigned short keyCode) {
+  switch (keyCode) {
+    case kVK_Escape: return REX_KEY_ESCAPE;
+    case kVK_Tab: return REX_KEY_TAB;
+    case kVK_Return: return REX_KEY_ENTER;
+    case kVK_Delete: return REX_KEY_BACKSPACE;
+    case kVK_ForwardDelete: return REX_KEY_DELETE;
+    case kVK_Home: return REX_KEY_HOME;
+    case kVK_End: return REX_KEY_END;
+    case kVK_PageUp: return REX_KEY_PAGE_UP;
+    case kVK_PageDown: return REX_KEY_PAGE_DOWN;
+    case kVK_LeftArrow: return REX_KEY_LEFT;
+    case kVK_RightArrow: return REX_KEY_RIGHT;
+    case kVK_UpArrow: return REX_KEY_UP;
+    case kVK_DownArrow: return REX_KEY_DOWN;
+    case kVK_F1: return REX_KEY_F1;
+    case kVK_F2: return REX_KEY_F2;
+    case kVK_F3: return REX_KEY_F3;
+    case kVK_F4: return REX_KEY_F4;
+    case kVK_F5: return REX_KEY_F5;
+    case kVK_F6: return REX_KEY_F6;
+    case kVK_F7: return REX_KEY_F7;
+    case kVK_F8: return REX_KEY_F8;
+    case kVK_F9: return REX_KEY_F9;
+    case kVK_F10: return REX_KEY_F10;
+    case kVK_F11: return REX_KEY_F11;
+    case kVK_F12: return REX_KEY_F12;
+    case kVK_F13: return REX_KEY_F13;
+    case kVK_F14: return REX_KEY_F14;
+    case kVK_F15: return REX_KEY_F15;
+    case kVK_F16: return REX_KEY_F16;
+    case kVK_F17: return REX_KEY_F17;
+    case kVK_F18: return REX_KEY_F18;
+    case kVK_F19: return REX_KEY_F19;
+    case kVK_F20: return REX_KEY_F20;
+    case kVK_F21: return REX_KEY_F21;
+    case kVK_F22: return REX_KEY_F22;
+    case kVK_F23: return REX_KEY_F23;
+    case kVK_F24: return REX_KEY_F24;
+    case kVK_ANSI_Keypad0: return REX_KEY_KP_0;
+    case kVK_ANSI_Keypad1: return REX_KEY_KP_1;
+    case kVK_ANSI_Keypad2: return REX_KEY_KP_2;
+    case kVK_ANSI_Keypad3: return REX_KEY_KP_3;
+    case kVK_ANSI_Keypad4: return REX_KEY_KP_4;
+    case kVK_ANSI_Keypad5: return REX_KEY_KP_5;
+    case kVK_ANSI_Keypad6: return REX_KEY_KP_6;
+    case kVK_ANSI_Keypad7: return REX_KEY_KP_7;
+    case kVK_ANSI_Keypad8: return REX_KEY_KP_8;
+    case kVK_ANSI_Keypad9: return REX_KEY_KP_9;
+    case kVK_ANSI_KeypadDecimal: return REX_KEY_KP_DECIMAL;
+    case kVK_ANSI_KeypadDivide: return REX_KEY_KP_DIVIDE;
+    case kVK_ANSI_KeypadMultiply: return REX_KEY_KP_MULTIPLY;
+    case kVK_ANSI_KeypadMinus: return REX_KEY_KP_SUBTRACT;
+    case kVK_ANSI_KeypadPlus: return REX_KEY_KP_ADD;
+    case kVK_ANSI_KeypadEnter: return REX_KEY_KP_ENTER;
+    case kVK_ANSI_KeypadEquals: return REX_KEY_KP_EQUAL;
+    case kVK_Shift: return REX_KEY_LEFT_SHIFT;
+    case kVK_RightShift: return REX_KEY_RIGHT_SHIFT;
+    case kVK_Control: return REX_KEY_LEFT_CONTROL;
+    case kVK_RightControl: return REX_KEY_RIGHT_CONTROL;
+    case kVK_Option: return REX_KEY_LEFT_ALT;
+    case kVK_RightOption: return REX_KEY_RIGHT_ALT;
+    case kVK_Command: return REX_KEY_LEFT_SUPER;
+    case kVK_RightCommand: return REX_KEY_RIGHT_SUPER;
+    default: break;
+  }
+  return REX_KEY_UNKNOWN;
+}
+
 @interface RexView : NSView
 @end
 
@@ -115,9 +240,37 @@ static void ui_update_modifiers(NSEventModifierFlags mods) {
 }
 - (void)mouseDown:(NSEvent*)event {
   ui_mouse_down = 1;
+  ui_mouse_buttons[REX_MOUSE_LEFT] = 1;
 }
 - (void)mouseUp:(NSEvent*)event {
   ui_mouse_down = 0;
+  ui_mouse_buttons[REX_MOUSE_LEFT] = 0;
+}
+- (void)rightMouseDown:(NSEvent*)event {
+  ui_mouse_buttons[REX_MOUSE_RIGHT] = 1;
+}
+- (void)rightMouseUp:(NSEvent*)event {
+  ui_mouse_buttons[REX_MOUSE_RIGHT] = 0;
+}
+- (void)otherMouseDown:(NSEvent*)event {
+  NSInteger button = [event buttonNumber];
+  if (button == 2) {
+    ui_mouse_buttons[REX_MOUSE_MIDDLE] = 1;
+  } else if (button == 3) {
+    ui_mouse_buttons[REX_MOUSE_BUTTON_4] = 1;
+  } else if (button == 4) {
+    ui_mouse_buttons[REX_MOUSE_BUTTON_5] = 1;
+  }
+}
+- (void)otherMouseUp:(NSEvent*)event {
+  NSInteger button = [event buttonNumber];
+  if (button == 2) {
+    ui_mouse_buttons[REX_MOUSE_MIDDLE] = 0;
+  } else if (button == 3) {
+    ui_mouse_buttons[REX_MOUSE_BUTTON_4] = 0;
+  } else if (button == 4) {
+    ui_mouse_buttons[REX_MOUSE_BUTTON_5] = 0;
+  }
 }
 - (void)mouseMoved:(NSEvent*)event {
   NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
@@ -133,8 +286,18 @@ static void ui_update_modifiers(NSEventModifierFlags mods) {
   NSEventModifierFlags mods = [event modifierFlags];
   ui_update_modifiers(mods);
   NSString* ign = [event charactersIgnoringModifiers];
+  unichar c = 0;
   if ([ign length] > 0) {
-    unichar c = [ign characterAtIndex:0];
+    c = [ign characterAtIndex:0];
+  }
+  int code = ui_keycode_from_char(c);
+  if (code == REX_KEY_UNKNOWN) {
+    code = ui_keycode_from_keycode([event keyCode]);
+  }
+  if (code >= 0 && code < REX_UI_KEY_MAX) {
+    ui_key_states[code] = 1;
+  }
+  if ([ign length] > 0) {
     switch (c) {
       case NSTabCharacter: ui_key_tab = 1; break;
       case NSCarriageReturnCharacter: ui_key_enter = 1; break;
@@ -179,10 +342,20 @@ static void ui_update_modifiers(NSEventModifierFlags mods) {
 }
 - (void)keyUp:(NSEvent*)event {
   NSString* ign = [event charactersIgnoringModifiers];
+  unichar c = 0;
+  if ([ign length] > 0) {
+    c = [ign characterAtIndex:0];
+  }
+  int code = ui_keycode_from_char(c);
+  if (code == REX_KEY_UNKNOWN) {
+    code = ui_keycode_from_keycode([event keyCode]);
+  }
+  if (code >= 0 && code < REX_UI_KEY_MAX) {
+    ui_key_states[code] = 0;
+  }
   if ([ign length] == 0) {
     return;
   }
-  unichar c = [ign characterAtIndex:0];
   if (c == NSTabCharacter) ui_key_tab = 0;
   if (c == NSCarriageReturnCharacter) ui_key_enter = 0;
   if (c == ' ') ui_key_space = 0;
@@ -196,10 +369,31 @@ static void ui_update_modifiers(NSEventModifierFlags mods) {
   if (c == NSEndFunctionKey) ui_key_end = 0;
 }
 - (void)flagsChanged:(NSEvent*)event {
-  ui_update_modifiers([event modifierFlags]);
+  NSEventModifierFlags mods = [event modifierFlags];
+  ui_update_modifiers(mods);
+  int code = ui_keycode_from_keycode([event keyCode]);
+  int down = 0;
+  if (code == REX_KEY_LEFT_SHIFT || code == REX_KEY_RIGHT_SHIFT) {
+    down = (mods & NSEventModifierFlagShift) != 0;
+  } else if (code == REX_KEY_LEFT_CONTROL || code == REX_KEY_RIGHT_CONTROL) {
+    down = (mods & NSEventModifierFlagControl) != 0;
+  } else if (code == REX_KEY_LEFT_ALT || code == REX_KEY_RIGHT_ALT) {
+    down = (mods & NSEventModifierFlagOption) != 0;
+  } else if (code == REX_KEY_LEFT_SUPER || code == REX_KEY_RIGHT_SUPER) {
+    down = (mods & NSEventModifierFlagCommand) != 0;
+  }
+  if (code >= 0 && code < REX_UI_KEY_MAX) {
+    ui_key_states[code] = down;
+  }
 }
 - (void)scrollWheel:(NSEvent*)event {
   CGFloat delta = [event scrollingDeltaY];
+  CGFloat deltaX = [event scrollingDeltaX];
+  if (deltaX > 0) {
+    ui_scroll_x += 1;
+  } else if (deltaX < 0) {
+    ui_scroll_x -= 1;
+  }
   if (delta > 0) {
     ui_scroll_y += 1;
   } else if (delta < 0) {
@@ -260,6 +454,7 @@ void rex_ui_platform_shutdown(void) {
 
 int rex_ui_platform_poll(RexUIPlatformInput* input) {
   ui_text_len = 0;
+  ui_scroll_x = 0;
   ui_scroll_y = 0;
   ui_key_copy = 0;
   ui_key_paste = 0;
@@ -295,7 +490,12 @@ int rex_ui_platform_poll(RexUIPlatformInput* input) {
   input->mouse_x = ui_mouse_x;
   input->mouse_y = ui_mouse_y;
   input->mouse_down = ui_mouse_down;
+  for (int i = 0; i < REX_UI_MOUSE_BUTTONS; i++) {
+    input->mouse_buttons[i] = ui_mouse_buttons[i];
+  }
+  input->scroll_x = ui_scroll_x;
   input->scroll_y = ui_scroll_y;
+  memcpy(input->key_states, ui_key_states, sizeof(ui_key_states));
   input->key_tab = ui_key_tab;
   input->key_enter = ui_key_enter;
   input->key_space = ui_key_space;

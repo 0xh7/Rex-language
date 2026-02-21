@@ -1,4 +1,3 @@
--- Thanks for the Rex team; I swear they make me happy.
 -- Rex CLI
 -- Usage: rex <command> [options]
 
@@ -15,6 +14,15 @@ local function read_file(path)
   local data = f:read("*a")
   f:close()
   return data
+end
+
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then
+    f:close()
+    return true
+  end
+  return false
 end
 
 local function write_file(path, data)
@@ -56,6 +64,69 @@ local function split_dir(path)
   return path:match("^(.*)[/\\]")
 end
 
+local function normalize_path(path)
+  local normalized = (path or ""):gsub("\\", "/")
+  return normalized
+end
+
+local function is_absolute_path(path)
+  if not path or path == "" then
+    return false
+  end
+  if path:sub(1, 1) == "/" then
+    return true
+  end
+  if path:match("^%a:[/\\]") then
+    return true
+  end
+  if path:match("^\\\\") then
+    return true
+  end
+  return false
+end
+
+local function read_with_includes(path, seen, stack, deps)
+  local key = normalize_path(path)
+  seen = seen or {}
+  stack = stack or {}
+  deps = deps or {}
+  if stack[key] then
+    error("Include cycle detected: " .. key)
+  end
+  if seen[key] then
+    return "", deps
+  end
+  seen[key] = true
+  stack[key] = true
+  table.insert(deps, key)
+
+  local source, err = read_file(path)
+  if not source then
+    error("Failed to read " .. path .. ": " .. err)
+  end
+  local base = split_dir(path) or "."
+  local out = {}
+  for line in (source .. "\n"):gmatch("(.-)\n") do
+    local inc = line:match("^%s*//%s*@include%s+(.+)%s*$")
+    if inc then
+      inc = inc:gsub("^\"", ""):gsub("\"$", "")
+      local inc_path = inc
+      if not is_absolute_path(inc_path) then
+        inc_path = base .. "/" .. inc_path
+      end
+      inc_path = normalize_path(inc_path)
+      table.insert(out, "// @include " .. inc)
+      local include_src = read_with_includes(inc_path, seen, stack, deps)
+      table.insert(out, include_src)
+      table.insert(out, "// @endinclude " .. inc)
+    else
+      table.insert(out, line)
+    end
+  end
+  stack[key] = nil
+  return table.concat(out, "\n"), deps
+end
+
 local function script_root()
   local src = debug.getinfo(1, "S").source
   if src:sub(1, 1) == "@" then
@@ -93,6 +164,27 @@ local function default_exe_path(out)
   return base
 end
 
+local function path_stem(path)
+  local p = normalize_path(path or "")
+  local name = p:match("([^/]+)$") or p
+  local stem = name:gsub("%.rex$", "")
+  if stem == "" then
+    return "app"
+  end
+  return stem
+end
+
+local function unique_suffix()
+  local tmp = os.tmpname()
+  if type(tmp) == "string" and tmp ~= "" then
+    local cleaned = tmp:gsub("[^%w]+", "")
+    if cleaned ~= "" then
+      return cleaned
+    end
+  end
+  return tostring(os.time())
+end
+
 local function detect_platform()
   if is_windows() then
     return "windows"
@@ -114,7 +206,9 @@ end
 
 local function list_example_files()
   local sep = package.config:sub(1, 1)
-  local cmd = sep == "\\" and 'dir /b "examples\\*.rex"' or "ls examples/*.rex"
+  local cmd = sep == "\\"
+    and 'dir /s /b "examples\\*.rex"'
+    or 'find "examples" -type f -name "*.rex"'
   local p = io.popen(cmd)
   if not p then
     return {}
@@ -123,14 +217,12 @@ local function list_example_files()
   for line in p:lines() do
     line = line:gsub("\r", "")
     if line ~= "" then
-      if sep == "\\" then
-        table.insert(files, "examples/" .. line)
-      else
-        table.insert(files, line)
-      end
+      line = normalize_path(line)
+      table.insert(files, line)
     end
   end
   p:close()
+  table.sort(files)
   return files
 end
 
@@ -151,21 +243,164 @@ local function exec_ok(cmd)
   return false
 end
 
-local function compile_c(source, output, cc)
+local function normalize_build_mode(mode)
+  local m = mode
+  if not m or m == "" then
+    m = os.getenv("REX_BUILD_MODE") or os.getenv("REX_MODE") or "release"
+  end
+  m = tostring(m):lower()
+  if m == "release" or m == "debug" then
+    return m
+  end
+  error("Invalid build mode: " .. tostring(mode) .. " (expected 'release' or 'debug')")
+end
+
+local function parse_elapsed_ms(output)
+  if not output then
+    return nil
+  end
+  local ms = output:match("elapsed:%s*([%+%-]?[%d%.]+)%s*ms")
+  if not ms then
+    ms = output:match("elapsed_ms%s*=%s*([%+%-]?[%d%.]+)")
+  end
+  if not ms then
+    return nil
+  end
+  return tonumber(ms)
+end
+
+local BUILD_CACHE_VERSION = "2026-02-09-v1"
+
+local function hash_data(data)
+  local h = 5381
+  for i = 1, #data do
+    h = (h * 33 + data:byte(i)) % 4294967296
+  end
+  return string.format("%08x", h)
+end
+
+local function make_fingerprint(parts)
+  return hash_data(table.concat(parts, "\0"))
+end
+
+local function read_cache(path)
+  local text = read_file(path)
+  if not text then
+    return {}
+  end
+  local out = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    local k, v = line:match("^([^=]+)=(.*)$")
+    if k then
+      out[k] = v
+    end
+  end
+  return out
+end
+
+local function write_cache(path, data)
+  local keys = {}
+  for k, _ in pairs(data) do
+    table.insert(keys, k)
+  end
+  table.sort(keys)
+  local lines = {}
+  for _, k in ipairs(keys) do
+    table.insert(lines, k .. "=" .. tostring(data[k]))
+  end
+  return write_file(path, table.concat(lines, "\n") .. "\n")
+end
+
+local function has_alsa()
+  if exec_ok("pkg-config --exists alsa 2>/dev/null") then
+    return true
+  end
+  local headers = {
+    "/usr/include/alsa/asoundlib.h",
+    "/usr/local/include/alsa/asoundlib.h",
+  }
+  local header_ok = false
+  for _, path in ipairs(headers) do
+    if file_exists(path) then
+      header_ok = true
+      break
+    end
+  end
+  if not header_ok then
+    return false
+  end
+  local libs = {
+    "/lib/libasound.so",
+    "/lib/libasound.so.2",
+    "/lib64/libasound.so",
+    "/lib64/libasound.so.2",
+    "/lib/x86_64-linux-gnu/libasound.so",
+    "/lib/x86_64-linux-gnu/libasound.so.2",
+    "/usr/lib/libasound.so",
+    "/usr/lib/libasound.so.2",
+    "/usr/lib64/libasound.so",
+    "/usr/lib64/libasound.so.2",
+    "/usr/lib/x86_64-linux-gnu/libasound.so",
+    "/usr/lib/x86_64-linux-gnu/libasound.so.2",
+    "/usr/local/lib/libasound.so",
+    "/usr/local/lib/libasound.so.2",
+  }
+  for _, path in ipairs(libs) do
+    if file_exists(path) then
+      return true
+    end
+  end
+  return false
+end
+
+local function compile_c(source, output, cc, mode)
   local root = script_root()
   local runtime_dir = root .. "/runtime_c"
   local runtime_c = runtime_dir .. "/rex_rt.c"
   local ui_common = runtime_dir .. "/rex_ui.c"
+  local audio_common = runtime_dir .. "/rex_audio.c"
+  local audio_mac = runtime_dir .. "/rex_audio_mac.m"
   local platform = detect_platform()
   local sources = { source, runtime_c, ui_common }
+  mode = normalize_build_mode(mode)
+  local cflags = ""
+  if mode == "debug" then
+    cflags = cflags .. " -O0 -g3 -DREX_DEBUG=1"
+  else
+    cflags = cflags .. " -O3 -DNDEBUG"
+  end
+  local opt_flag = os.getenv("REX_OPT_FLAG")
+  if opt_flag and opt_flag ~= "" then
+    local lowered = opt_flag:lower()
+    if lowered == "0" or lowered == "off" or lowered == "none" then
+      cflags = cflags:gsub("%s%-O%d%s", " ")
+      cflags = cflags:gsub("%s%-O%d$", "")
+      cflags = cflags:gsub("^%-O%d%s", "")
+    else
+      cflags = cflags .. " " .. opt_flag
+    end
+  end
+  local extra_cflags = os.getenv("REX_CFLAGS")
+  if extra_cflags and extra_cflags ~= "" then
+    cflags = cflags .. " " .. extra_cflags
+  end
   local libs = ""
   if platform == "windows" then
+    table.insert(sources, audio_common)
     table.insert(sources, runtime_dir .. "/rex_ui_win.c")
     libs = " -lgdi32 -luser32 -lws2_32 -lwinhttp -lcrypt32 -lwinmm -lole32 -luuid -lwindowscodecs"
   elseif platform == "linux" then
+    table.insert(sources, audio_common)
     table.insert(sources, runtime_dir .. "/rex_ui_x11.c")
-    libs = " -lX11 -pthread -lssl -lcrypto"
+    libs = " -lX11 -pthread -lssl -lcrypto -lm"
+    if has_alsa() then
+      libs = libs .. " -lasound"
+      cflags = cflags .. " -DREX_AUDIO_HAS_ALSA=1"
+    else
+      cflags = cflags .. " -DREX_AUDIO_HAS_ALSA=0"
+    end
   elseif platform == "mac" then
+    table.insert(sources, audio_mac)
     table.insert(sources, runtime_dir .. "/rex_ui_mac.m")
     libs = " -framework Cocoa -lssl -lcrypto"
   end
@@ -174,17 +409,79 @@ local function compile_c(source, output, cc)
   for _, path in ipairs(sources) do
     table.insert(quoted, "\"" .. path .. "\"")
   end
-  local cmd = string.format('%s %s -I \"%s\" -o \"%s\"%s', cc, table.concat(quoted, " "), runtime_dir, output, libs)
+  local native_key_parts = {
+    BUILD_CACHE_VERSION,
+    "native",
+    platform,
+    cc or "",
+    mode or "",
+    cflags,
+    libs,
+  }
+  for _, path in ipairs(sources) do
+    local data, err = read_file(path)
+    if not data then
+      error("Failed to read " .. path .. ": " .. err)
+    end
+    table.insert(native_key_parts, normalize_path(path))
+    table.insert(native_key_parts, hash_data(data))
+  end
+  local runtime_headers = {
+    runtime_dir .. "/rex_rt.h",
+    runtime_dir .. "/rex_ui.h",
+    runtime_dir .. "/rex_audio.h",
+  }
+  for _, path in ipairs(runtime_headers) do
+    local data = read_file(path)
+    if data then
+      table.insert(native_key_parts, normalize_path(path))
+      table.insert(native_key_parts, hash_data(data))
+    end
+  end
+  local native_hash = make_fingerprint(native_key_parts)
+  local native_cache_path = output .. ".native.cache"
+  local native_cache = read_cache(native_cache_path)
+  if file_exists(output) and native_cache.version == BUILD_CACHE_VERSION and native_cache.native_hash == native_hash then
+    return { cached = true, hash = native_hash, cache_path = native_cache_path }
+  end
+
+  local cmd = string.format('%s %s%s -I \"%s\" -o \"%s\"%s', cc, table.concat(quoted, " "), cflags, runtime_dir, output, libs)
   if not exec_ok(cmd) then
     error("C compile failed. Check that your compiler is available.")
   end
+  local ok, werr = write_cache(native_cache_path, {
+    version = BUILD_CACHE_VERSION,
+    native_hash = native_hash,
+  })
+  if not ok then
+    error("Failed to write cache " .. native_cache_path .. ": " .. werr)
+  end
+  return { cached = false, hash = native_hash, cache_path = native_cache_path }
 end
 
 local function build(input, c_out, emit_entry)
-  local source, err = read_file(input)
-  if not source then
-    error("Failed to read " .. input .. ": " .. err)
+  local source, deps = read_with_includes(input)
+  local source_hash = make_fingerprint({
+    BUILD_CACHE_VERSION,
+    "rex-codegen",
+    tostring(emit_entry ~= false),
+    source,
+  })
+  local build_cache_path = c_out .. ".build.cache"
+  local build_cache = read_cache(build_cache_path)
+  if file_exists(c_out)
+    and build_cache.version == BUILD_CACHE_VERSION
+    and build_cache.source_hash == source_hash
+    and build_cache.emit_entry == tostring(emit_entry ~= false)
+  then
+    return {
+      cached = true,
+      hash = source_hash,
+      cache_path = build_cache_path,
+      deps = deps or {},
+    }
   end
+
   local lexer = Lexer.new(source)
   local tokens = lexer:tokenize()
   local parser = Parser.new(tokens)
@@ -196,6 +493,20 @@ local function build(input, c_out, emit_entry)
   if not ok then
     error("Failed to write " .. c_out .. ": " .. werr)
   end
+  local wrote, cerr = write_cache(build_cache_path, {
+    version = BUILD_CACHE_VERSION,
+    source_hash = source_hash,
+    emit_entry = tostring(emit_entry ~= false),
+  })
+  if not wrote then
+    error("Failed to write cache " .. build_cache_path .. ": " .. cerr)
+  end
+  return {
+    cached = false,
+    hash = source_hash,
+    cache_path = build_cache_path,
+    deps = deps or {},
+  }
 end
 
 local function init_project(path)
@@ -221,11 +532,13 @@ end
 local function usage()
   print("Rex CLI")
   print("  rex init <dir>")
-  print("  rex build [input] [--out path] [--c-out path] [--no-entry] [--no-native] [--cc compiler]")
-  print("  rex run [input] [--cc compiler]")
+  print("  rex build [input] [--out path] [--c-out path] [--no-entry] [--no-native] [--cc compiler] [--mode release|debug]")
+  print("  rex run [input] [--cc compiler] [--mode release|debug]")
+  print("  rex bench [input] [--runs n] [--cc compiler] [--mode release|debug]")
   print("  rex test (builds examples to C)")
   print("  rex fmt [input]")
   print("  rex lint [input]")
+  print("  rex check [input]")
 end
 
 local args = { ... }
@@ -244,6 +557,7 @@ elseif cmd == "build" then
   local emit_entry = true
   local native = true
   local cc = os.getenv("CC") or "cc"
+  local mode = normalize_build_mode(nil)
   local i = 3
   while i <= #args do
     local a = args[i]
@@ -271,6 +585,12 @@ elseif cmd == "build" then
       end
       cc = args[i + 1]
       i = i + 1
+    elseif a == "--mode" then
+      if not args[i + 1] then
+        error("--mode requires a value")
+      end
+      mode = normalize_build_mode(args[i + 1])
+      i = i + 1
     end
     i = i + 1
   end
@@ -280,19 +600,30 @@ elseif cmd == "build" then
   if c_out_set and not out_set then
     out = default_exe_path(c_out)
   end
-  build(input, c_out, emit_entry)
+  local build_info = build(input, c_out, emit_entry)
   if native then
-    compile_c(c_out, out, cc)
-    print("Native " .. out)
+    local native_info = compile_c(c_out, out, cc, mode)
+    if native_info.cached then
+      print("Native (cached) " .. out)
+    else
+      print("Native " .. out)
+    end
   end
-  print("Built " .. c_out)
+  if build_info.cached then
+    print("Built (cached) " .. c_out)
+  else
+    print("Built " .. c_out)
+  end
 elseif cmd == "run" then
   local input = args[2] or "src/main.rex"
-  local c_out = default_c_out()
+  local run_base = path_stem(input)
+  local run_id = unique_suffix()
+  local c_out = "build/run/" .. run_base .. "_" .. run_id .. ".c"
   local out = default_exe_path(c_out)
   local out_set = false
   local c_out_set = false
   local cc = os.getenv("CC") or "cc"
+  local mode = normalize_build_mode(nil)
   local i = 3
   while i <= #args do
     local a = args[i]
@@ -316,6 +647,12 @@ elseif cmd == "run" then
       c_out = args[i + 1]
       c_out_set = true
       i = i + 1
+    elseif a == "--mode" then
+      if not args[i + 1] then
+        error("--mode requires a value")
+      end
+      mode = normalize_build_mode(args[i + 1])
+      i = i + 1
     end
     i = i + 1
   end
@@ -323,10 +660,89 @@ elseif cmd == "run" then
     out = default_exe_path(c_out)
   end
   build(input, c_out, true)
-  compile_c(c_out, out, cc)
+  compile_c(c_out, out, cc, mode)
   local run_path = cmd_path(out)
   if not exec_ok('"' .. run_path .. '"') then
     error("Run failed")
+  end
+elseif cmd == "bench" then
+  local input = args[2] or "examples/benchmark.rex"
+  local runs = 5
+  local cc = os.getenv("CC") or "cc"
+  local mode = normalize_build_mode(nil)
+  local i = 3
+  if input:sub(1, 2) == "--" then
+    input = "examples/benchmark.rex"
+    i = 2
+  end
+  while i <= #args do
+    local a = args[i]
+    if a == "--runs" then
+      if not args[i + 1] then
+        error("--runs requires a value")
+      end
+      runs = tonumber(args[i + 1]) or 0
+      i = i + 1
+    elseif a == "--cc" then
+      if not args[i + 1] then
+        error("--cc requires a value")
+      end
+      cc = args[i + 1]
+      i = i + 1
+    elseif a == "--mode" then
+      if not args[i + 1] then
+        error("--mode requires a value")
+      end
+      mode = normalize_build_mode(args[i + 1])
+      i = i + 1
+    end
+    i = i + 1
+  end
+  if runs < 1 then
+    error("--runs must be >= 1")
+  end
+  local bench_base = path_stem(input)
+  local bench_id = unique_suffix()
+  local c_out = "build/bench/" .. bench_base .. "_" .. bench_id .. ".c"
+  local out = default_exe_path("build/bench/" .. bench_base .. "_" .. bench_id)
+  build(input, c_out, true)
+  compile_c(c_out, out, cc, mode)
+  local run_path = cmd_path(out)
+  local count = 0
+  local sum = 0.0
+  local min_ms = nil
+  local max_ms = nil
+  for r = 1, runs do
+    local p = io.popen('"' .. run_path .. '"')
+    if not p then
+      error("Failed to run benchmark executable")
+    end
+    local output = p:read("*a") or ""
+    local ok = p:close()
+    if ok == false then
+      error("Benchmark run failed")
+    end
+    local elapsed = parse_elapsed_ms(output)
+    if elapsed then
+      count = count + 1
+      sum = sum + elapsed
+      if not min_ms or elapsed < min_ms then
+        min_ms = elapsed
+      end
+      if not max_ms or elapsed > max_ms then
+        max_ms = elapsed
+      end
+      print(string.format("run#%d elapsed_ms=%.6f", r, elapsed))
+    else
+      print("run#" .. r .. " elapsed_ms=NA")
+    end
+  end
+  if count > 0 then
+    print(string.format("avg_ms=%.6f", sum / count))
+    print(string.format("min_ms=%.6f", min_ms))
+    print(string.format("max_ms=%.6f", max_ms))
+  else
+    print("No elapsed values parsed from output.")
   end
 elseif cmd == "test" then
   local files = list_example_files()
@@ -355,10 +771,16 @@ elseif cmd == "fmt" then
   print("Formatted " .. input)
 elseif cmd == "lint" then
   local input = args[2] or "src/main.rex"
-  local source, err = read_file(input)
-  if not source then
-    error("Failed to read " .. input .. ": " .. err)
-  end
+  local source = read_with_includes(input)
+  local lexer = Lexer.new(source)
+  local tokens = lexer:tokenize()
+  local parser = Parser.new(tokens)
+  local ast = parser:parse_program()
+  Typechecker.check(ast)
+  print("OK " .. input)
+elseif cmd == "check" then
+  local input = args[2] or "src/main.rex"
+  local source = read_with_includes(input)
   local lexer = Lexer.new(source)
   local tokens = lexer:tokenize()
   local parser = Parser.new(tokens)

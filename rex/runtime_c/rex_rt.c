@@ -1,4 +1,5 @@
 #include "rex_rt.h"
+#include "rex_audio.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -17,6 +18,7 @@
 #define rex_stat _stat
 typedef struct _stat rex_stat_t;
 #else
+#include <dirent.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -106,6 +108,8 @@ typedef struct RexThreadNode {
 
 static RexThreadNode* rex_threads_head = NULL;
 static RexThreadNode* rex_threads_tail = NULL;
+static int rex_os_argc = 0;
+static char** rex_os_argv = NULL;
 #ifdef _WIN32
 static CRITICAL_SECTION rex_thread_lock;
 static int rex_thread_lock_init = 0;
@@ -1038,6 +1042,72 @@ RexValue rex_abs(RexValue v) {
   return rex_num(fabs(v.as.num));
 }
 
+RexValue rex_math_eval(RexValue expr) {
+  expr = rex_resolve(expr);
+  if (expr.tag != REX_STR) {
+    rex_panic("math.eval expects string");
+    return rex_err(rex_str("bad expression"));
+  }
+
+  const char* s = expr.as.str ? expr.as.str : "";
+  while (*s && isspace((unsigned char)*s)) {
+    s++;
+  }
+
+  errno = 0;
+  char* end = NULL;
+  double lhs = strtod(s, &end);
+  if (end == s || errno == ERANGE) {
+    return rex_err(rex_str("expected left number"));
+  }
+
+  s = end;
+  while (*s && isspace((unsigned char)*s)) {
+    s++;
+  }
+
+  char op = *s;
+  if (op != '+' && op != '-' && op != '*' && op != '/') {
+    return rex_err(rex_str("expected operator (+,-,*,/)"));
+  }
+  s++;
+
+  while (*s && isspace((unsigned char)*s)) {
+    s++;
+  }
+
+  errno = 0;
+  end = NULL;
+  double rhs = strtod(s, &end);
+  if (end == s || errno == ERANGE) {
+    return rex_err(rex_str("expected right number"));
+  }
+
+  s = end;
+  while (*s && isspace((unsigned char)*s)) {
+    s++;
+  }
+  if (*s != '\0') {
+    return rex_err(rex_str("trailing data"));
+  }
+
+  if (op == '/' && rhs == 0.0) {
+    return rex_err(rex_str("division by zero"));
+  }
+
+  double out = 0.0;
+  if (op == '+') {
+    out = lhs + rhs;
+  } else if (op == '-') {
+    out = lhs - rhs;
+  } else if (op == '*') {
+    out = lhs * rhs;
+  } else {
+    out = lhs / rhs;
+  }
+  return rex_ok(rex_num(out));
+}
+
 RexValue rex_random_seed(RexValue seed) {
   seed = rex_resolve(seed);
   if (seed.tag != REX_NUM) {
@@ -1299,6 +1369,19 @@ RexValue rex_fs_mkdir(RexValue path) {
     rex_panic("fs_mkdir expects string path");
     return rex_err(rex_str("bad path"));
   }
+  rex_stat_t st;
+  if (rex_stat(path.as.str, &st) == 0) {
+#ifdef _WIN32
+    if (st.st_mode & _S_IFDIR) {
+      return rex_ok(rex_bool(1));
+    }
+#else
+    if (S_ISDIR(st.st_mode)) {
+      return rex_ok(rex_bool(1));
+    }
+#endif
+    return rex_err(rex_str("path exists"));
+  }
 #ifdef _WIN32
   int rc = _mkdir(path.as.str);
 #else
@@ -1316,10 +1399,185 @@ RexValue rex_fs_remove(RexValue path) {
     rex_panic("fs_remove expects string path");
     return rex_err(rex_str("bad path"));
   }
+  rex_stat_t st;
+  if (rex_stat(path.as.str, &st) != 0) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+#ifdef _WIN32
+  if (st.st_mode & _S_IFDIR) {
+    if (_rmdir(path.as.str) == 0) {
+      return rex_ok(rex_bool(1));
+    }
+    return rex_err(rex_str(strerror(errno)));
+  }
+#else
+  if (S_ISDIR(st.st_mode)) {
+    if (rmdir(path.as.str) == 0) {
+      return rex_ok(rex_bool(1));
+    }
+    return rex_err(rex_str(strerror(errno)));
+  }
+#endif
   if (remove(path.as.str) == 0) {
     return rex_ok(rex_bool(1));
   }
   return rex_err(rex_str(strerror(errno)));
+}
+
+RexValue rex_fs_is_dir(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("fs_is_dir expects string path");
+    return rex_bool(0);
+  }
+  rex_stat_t st;
+  if (rex_stat(path.as.str, &st) != 0) {
+    return rex_bool(0);
+  }
+#ifdef _WIN32
+  return rex_bool((st.st_mode & _S_IFDIR) != 0);
+#else
+  return rex_bool(S_ISDIR(st.st_mode));
+#endif
+}
+
+static RexValue rex_fs_copy_file(const char* src, const char* dst) {
+  FILE* in = fopen(src, "rb");
+  if (!in) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+  FILE* out = fopen(dst, "wb");
+  if (!out) {
+    fclose(in);
+    return rex_err(rex_str(strerror(errno)));
+  }
+  char buf[32768];
+  size_t n = 0;
+  while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+    if (fwrite(buf, 1, n, out) != n) {
+      fclose(in);
+      fclose(out);
+      return rex_err(rex_str("write failed"));
+    }
+  }
+  if (ferror(in)) {
+    fclose(in);
+    fclose(out);
+    return rex_err(rex_str("read failed"));
+  }
+  fclose(in);
+  fclose(out);
+  return rex_ok(rex_bool(1));
+}
+
+RexValue rex_fs_copy(RexValue src, RexValue dst) {
+  src = rex_resolve(src);
+  dst = rex_resolve(dst);
+  if (src.tag != REX_STR || dst.tag != REX_STR) {
+    rex_panic("fs_copy expects string paths");
+    return rex_err(rex_str("bad path"));
+  }
+  rex_stat_t st;
+  if (rex_stat(src.as.str, &st) != 0) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+#ifdef _WIN32
+  if (st.st_mode & _S_IFDIR) {
+    return rex_err(rex_str("copy supports files only"));
+  }
+#else
+  if (S_ISDIR(st.st_mode)) {
+    return rex_err(rex_str("copy supports files only"));
+  }
+#endif
+  return rex_fs_copy_file(src.as.str, dst.as.str);
+}
+
+RexValue rex_fs_move(RexValue src, RexValue dst) {
+  src = rex_resolve(src);
+  dst = rex_resolve(dst);
+  if (src.tag != REX_STR || dst.tag != REX_STR) {
+    rex_panic("fs_move expects string paths");
+    return rex_err(rex_str("bad path"));
+  }
+#ifdef _WIN32
+  if (MoveFileExA(src.as.str, dst.as.str, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0) {
+    return rex_ok(rex_bool(1));
+  }
+  return rex_err(rex_str("move failed"));
+#else
+  if (rename(src.as.str, dst.as.str) == 0) {
+    return rex_ok(rex_bool(1));
+  }
+  if (errno != EXDEV) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+  RexValue copied = rex_fs_copy_file(src.as.str, dst.as.str);
+  if (copied.tag == REX_RESULT && rex_result_is(copied, "Ok")) {
+    if (remove(src.as.str) == 0) {
+      return rex_ok(rex_bool(1));
+    }
+    return rex_err(rex_str(strerror(errno)));
+  }
+  return copied;
+#endif
+}
+
+RexValue rex_fs_read_dir(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("fs_read_dir expects string path");
+    return rex_err(rex_str("bad path"));
+  }
+#ifdef _WIN32
+  const char* base = path.as.str;
+  size_t len = strlen(base);
+  size_t extra = 3u;
+  char* pattern = (char*)rex_xmalloc(len + extra);
+  size_t pos = 0;
+  if (len > 0) {
+    memcpy(pattern + pos, base, len);
+    pos += len;
+  }
+  if (pos > 0 && pattern[pos - 1] != '\\' && pattern[pos - 1] != '/') {
+    pattern[pos++] = '\\';
+  }
+  pattern[pos++] = '*';
+  pattern[pos] = '\0';
+
+  WIN32_FIND_DATAA data;
+  HANDLE h = FindFirstFileA(pattern, &data);
+  free(pattern);
+  if (h == INVALID_HANDLE_VALUE) {
+    return rex_err(rex_str("read_dir failed"));
+  }
+  RexValue vec = rex_collections_vec_new();
+  do {
+    const char* name = data.cFileName;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    rex_collections_vec_push(vec, rex_str(name));
+  } while (FindNextFileA(h, &data));
+  FindClose(h);
+  return rex_ok(vec);
+#else
+  DIR* d = opendir(path.as.str);
+  if (!d) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+  RexValue vec = rex_collections_vec_new();
+  struct dirent* ent = NULL;
+  while ((ent = readdir(d)) != NULL) {
+    const char* name = ent->d_name;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+      continue;
+    }
+    rex_collections_vec_push(vec, rex_str(name));
+  }
+  closedir(d);
+  return rex_ok(vec);
+#endif
 }
 
 RexValue rex_os_getenv(RexValue key) {
@@ -1336,17 +1594,410 @@ RexValue rex_os_getenv(RexValue key) {
 }
 
 RexValue rex_os_cwd(void) {
-  char buf[1024];
 #ifdef _WIN32
-  if (!_getcwd(buf, sizeof(buf))) {
+  char* buf = _getcwd(NULL, 0);
+  if (!buf) {
     return rex_nil();
   }
 #else
-  if (!getcwd(buf, sizeof(buf))) {
+  char* buf = getcwd(NULL, 0);
+  if (!buf) {
     return rex_nil();
   }
 #endif
-  return rex_str(buf);
+  RexValue out = rex_str(buf);
+  free(buf);
+  return out;
+}
+
+RexValue rex_os_platform(void) {
+#ifdef _WIN32
+  return rex_str("windows");
+#elif defined(__APPLE__)
+  return rex_str("mac");
+#elif defined(__linux__)
+  return rex_str("linux");
+#else
+  return rex_str("unknown");
+#endif
+}
+
+void rex_os_set_args(int argc, char** argv) {
+  rex_os_argc = argc;
+  rex_os_argv = argv;
+}
+
+RexValue rex_os_args(void) {
+  RexValue vec = rex_collections_vec_new();
+  for (int i = 0; i < rex_os_argc; i++) {
+    rex_collections_vec_push(vec, rex_str(rex_os_argv[i]));
+  }
+  return vec;
+}
+
+RexValue rex_os_home(void) {
+#ifdef _WIN32
+  const char* home = getenv("USERPROFILE");
+  if (home && home[0]) {
+    return rex_str(home);
+  }
+  const char* drive = getenv("HOMEDRIVE");
+  const char* path = getenv("HOMEPATH");
+  if (drive && path) {
+    size_t len = strlen(drive) + strlen(path) + 1u;
+    char* buf = (char*)rex_xmalloc(len);
+    snprintf(buf, len, "%s%s", drive, path);
+    RexValue out = rex_str(buf);
+    free(buf);
+    return out;
+  }
+  return rex_nil();
+#else
+  const char* home = getenv("HOME");
+  if (!home || !home[0]) {
+    return rex_nil();
+  }
+  return rex_str(home);
+#endif
+}
+
+RexValue rex_os_temp_dir(void) {
+#ifdef _WIN32
+  const char* temp = getenv("TEMP");
+  if (!temp || !temp[0]) {
+    temp = getenv("TMP");
+  }
+  if (temp && temp[0]) {
+    return rex_str(temp);
+  }
+  return rex_str("C:\\\\Windows\\\\Temp");
+#else
+  const char* temp = getenv("TMPDIR");
+  if (!temp || !temp[0]) {
+    temp = "/tmp";
+  }
+  return rex_str(temp);
+#endif
+}
+
+static int rex_path_is_sep(char c) {
+  return c == '/' || c == '\\';
+}
+
+static char rex_path_sep(void) {
+#ifdef _WIN32
+  return '\\';
+#else
+  return '/';
+#endif
+}
+
+static int rex_path_is_abs_cstr(const char* path) {
+  if (!path || !path[0]) {
+    return 0;
+  }
+#ifdef _WIN32
+  if ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/')) {
+    return 1;
+  }
+  if (isalpha((unsigned char)path[0]) && path[1] == ':') {
+    return 1;
+  }
+  return path[0] == '\\' || path[0] == '/';
+#else
+  return path[0] == '/';
+#endif
+}
+
+static RexValue rex_path_slice(const char* start, size_t len) {
+  char* buf = (char*)rex_xmalloc(len + 1u);
+  memcpy(buf, start, len);
+  buf[len] = '\0';
+  RexValue out = rex_str(buf);
+  free(buf);
+  return out;
+}
+
+RexValue rex_path_join(RexValue a, RexValue b) {
+  a = rex_resolve(a);
+  b = rex_resolve(b);
+  if (a.tag != REX_STR || b.tag != REX_STR) {
+    rex_panic("path_join expects string paths");
+    return rex_str("");
+  }
+  const char* left = a.as.str;
+  const char* right = b.as.str;
+  if (!left || !left[0]) {
+    return rex_str(right ? right : "");
+  }
+  if (!right || !right[0]) {
+    return rex_str(left);
+  }
+  if (rex_path_is_abs_cstr(right)) {
+    return rex_str(right);
+  }
+  size_t left_len = strlen(left);
+  size_t right_len = strlen(right);
+  while (right_len > 0 && rex_path_is_sep(right[0])) {
+    right++;
+    right_len--;
+  }
+  int need_sep = left_len > 0 && !rex_path_is_sep(left[left_len - 1]);
+  size_t total = left_len + (need_sep ? 1u : 0u) + right_len;
+  char* buf = (char*)rex_xmalloc(total + 1u);
+  size_t pos = 0;
+  memcpy(buf + pos, left, left_len);
+  pos += left_len;
+  if (need_sep) {
+    buf[pos++] = rex_path_sep();
+  }
+  memcpy(buf + pos, right, right_len);
+  pos += right_len;
+  buf[pos] = '\0';
+  RexValue out = rex_str(buf);
+  free(buf);
+  return out;
+}
+
+RexValue rex_path_basename(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("path_basename expects string path");
+    return rex_str("");
+  }
+  const char* p = path.as.str;
+  size_t len = strlen(p);
+  if (len == 0) {
+    return rex_str("");
+  }
+  size_t end = len;
+  while (end > 0 && rex_path_is_sep(p[end - 1])) {
+    end--;
+  }
+  if (end == 0) {
+    return rex_str(p);
+  }
+  size_t start = end;
+  while (start > 0 && !rex_path_is_sep(p[start - 1])) {
+    start--;
+  }
+  return rex_path_slice(p + start, end - start);
+}
+
+RexValue rex_path_dirname(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("path_dirname expects string path");
+    return rex_str(".");
+  }
+  const char* p = path.as.str;
+  size_t len = strlen(p);
+  if (len == 0) {
+    return rex_str(".");
+  }
+  size_t end = len;
+  while (end > 0 && rex_path_is_sep(p[end - 1])) {
+    end--;
+  }
+  if (end == 0) {
+    return rex_str(p);
+  }
+#ifdef _WIN32
+  if (end == 2 && isalpha((unsigned char)p[0]) && p[1] == ':') {
+    return rex_str(p);
+  }
+#endif
+  size_t pos = end;
+  while (pos > 0 && !rex_path_is_sep(p[pos - 1])) {
+    pos--;
+  }
+  if (pos == 0) {
+#ifdef _WIN32
+    if (end == 2 && isalpha((unsigned char)p[0]) && p[1] == ':') {
+      return rex_path_slice(p, end);
+    }
+#endif
+    return rex_str(".");
+  }
+  while (pos > 1 && rex_path_is_sep(p[pos - 1])) {
+    pos--;
+  }
+  return rex_path_slice(p, pos);
+}
+
+RexValue rex_path_ext(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("path_ext expects string path");
+    return rex_str("");
+  }
+  const char* p = path.as.str;
+  size_t len = strlen(p);
+  size_t end = len;
+  while (end > 0 && rex_path_is_sep(p[end - 1])) {
+    end--;
+  }
+  size_t start = end;
+  while (start > 0 && !rex_path_is_sep(p[start - 1])) {
+    start--;
+  }
+  const char* base = p + start;
+  size_t base_len = end - start;
+  const char* dot = NULL;
+  for (size_t i = 1; i < base_len; i++) {
+    if (base[i] == '.') {
+      dot = base + i;
+    }
+  }
+  if (!dot || dot[1] == '\0') {
+    return rex_str("");
+  }
+  return rex_path_slice(dot + 1, (p + end) - (dot + 1));
+}
+
+RexValue rex_path_stem(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("path_stem expects string path");
+    return rex_str("");
+  }
+  const char* p = path.as.str;
+  size_t len = strlen(p);
+  size_t end = len;
+  while (end > 0 && rex_path_is_sep(p[end - 1])) {
+    end--;
+  }
+  size_t start = end;
+  while (start > 0 && !rex_path_is_sep(p[start - 1])) {
+    start--;
+  }
+  const char* base = p + start;
+  size_t base_len = end - start;
+  const char* dot = NULL;
+  for (size_t i = 1; i < base_len; i++) {
+    if (base[i] == '.') {
+      dot = base + i;
+    }
+  }
+  if (!dot) {
+    return rex_path_slice(base, base_len);
+  }
+  return rex_path_slice(base, (size_t)(dot - base));
+}
+
+RexValue rex_path_is_abs(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR) {
+    rex_panic("path_is_abs expects string path");
+    return rex_bool(0);
+  }
+  return rex_bool(rex_path_is_abs_cstr(path.as.str));
+}
+
+RexValue rex_audio_play(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR || !path.as.str) {
+    rex_panic("audio.play expects string path");
+    return rex_bool(0);
+  }
+  return rex_bool(rex_audio_platform_play(path.as.str) != 0);
+}
+
+RexValue rex_audio_play_loop(RexValue path) {
+  path = rex_resolve(path);
+  if (path.tag != REX_STR || !path.as.str) {
+    rex_panic("audio.play_loop expects string path");
+    return rex_bool(0);
+  }
+  return rex_bool(rex_audio_platform_play_ex(path.as.str, 1) != 0);
+}
+
+RexValue rex_audio_stop(void) {
+  rex_audio_platform_stop();
+  return rex_nil();
+}
+
+RexValue rex_audio_supports(RexValue ext) {
+  ext = rex_resolve(ext);
+  if (ext.tag != REX_STR || !ext.as.str) {
+    rex_panic("audio.supports expects string extension");
+    return rex_bool(0);
+  }
+  return rex_bool(rex_audio_platform_supports(ext.as.str) != 0);
+}
+
+RexValue rex_audio_set_volume(RexValue value) {
+  value = rex_resolve(value);
+  if (value.tag != REX_NUM) {
+    rex_panic("audio.set_volume expects number");
+    return rex_nil();
+  }
+  rex_audio_platform_set_volume(value.as.num);
+  return rex_nil();
+}
+
+RexValue rex_audio_get_volume(void) {
+  return rex_num(rex_audio_platform_get_volume());
+}
+
+enum { REX_LOG_DEBUG = 0, REX_LOG_INFO = 1, REX_LOG_WARN = 2, REX_LOG_ERROR = 3 };
+static int rex_log_level = REX_LOG_INFO;
+
+static int rex_log_parse_level(RexValue v) {
+  v = rex_resolve(v);
+  if (v.tag == REX_NUM) {
+    int lvl = (int)v.as.num;
+    if (lvl < REX_LOG_DEBUG) {
+      lvl = REX_LOG_DEBUG;
+    } else if (lvl > REX_LOG_ERROR) {
+      lvl = REX_LOG_ERROR;
+    }
+    return lvl;
+  }
+  if (v.tag == REX_STR && v.as.str) {
+    const char* s = v.as.str;
+    if (strcmp(s, "debug") == 0) return REX_LOG_DEBUG;
+    if (strcmp(s, "info") == 0) return REX_LOG_INFO;
+    if (strcmp(s, "warn") == 0) return REX_LOG_WARN;
+    if (strcmp(s, "error") == 0) return REX_LOG_ERROR;
+  }
+  return rex_log_level;
+}
+
+static void rex_log_emit(int level, const char* label, RexValue value) {
+  if (level < rex_log_level) {
+    return;
+  }
+  fprintf(stderr, "[%s] %s\n", label, rex_to_cstr(value));
+}
+
+RexValue rex_log_debug(RexValue value) {
+  rex_log_emit(REX_LOG_DEBUG, "debug", value);
+  return rex_nil();
+}
+
+RexValue rex_log_info(RexValue value) {
+  rex_log_emit(REX_LOG_INFO, "info", value);
+  return rex_nil();
+}
+
+RexValue rex_log_warn(RexValue value) {
+  rex_log_emit(REX_LOG_WARN, "warn", value);
+  return rex_nil();
+}
+
+RexValue rex_log_error(RexValue value) {
+  rex_log_emit(REX_LOG_ERROR, "error", value);
+  return rex_nil();
+}
+
+RexValue rex_log_set_level(RexValue value) {
+  rex_log_level = rex_log_parse_level(value);
+  return rex_nil();
+}
+
+RexValue rex_log_get_level(void) {
+  return rex_num(rex_log_level);
 }
 
 static void vec_grow(RexVec* v) {
@@ -1579,6 +2230,9 @@ RexValue rex_collections_vec_slice(RexValue vec, RexValue start, RexValue finish
   if (s < 0) {
     s = 0;
   }
+  if (s > v->count) {
+    s = v->count;
+  }
   if (e < s) {
     e = s;
   }
@@ -1600,6 +2254,76 @@ RexValue rex_collections_vec_slice(RexValue vec, RexValue start, RexValue finish
   outv.tag = REX_VEC;
   outv.as.ptr = out;
   return outv;
+}
+
+static RexValue rex_string_get(RexValue str, RexValue index) {
+  str = rex_resolve(str);
+  index = rex_resolve(index);
+  if (str.tag != REX_STR) {
+    rex_panic("string index expects string");
+    return rex_nil();
+  }
+  if (index.tag != REX_NUM) {
+    rex_panic("string index expects numeric index");
+    return rex_nil();
+  }
+  const char* s = str.as.str ? str.as.str : "";
+  int len = (int)strlen(s);
+  int idx = (int)index.as.num;
+  if (idx < 0 || idx >= len) {
+    rex_panic("string index out of range");
+    return rex_nil();
+  }
+  char out[2];
+  out[0] = s[idx];
+  out[1] = '\0';
+  return rex_str(out);
+}
+
+static RexValue rex_string_slice(RexValue str, RexValue start, RexValue finish) {
+  str = rex_resolve(str);
+  start = rex_resolve(start);
+  finish = rex_resolve(finish);
+  if (str.tag != REX_STR) {
+    rex_panic("string slice expects string");
+    return rex_nil();
+  }
+  if (start.tag != REX_NUM) {
+    rex_panic("string slice expects numeric start");
+    return rex_nil();
+  }
+  const char* s = str.as.str ? str.as.str : "";
+  int len = (int)strlen(s);
+  int from = (int)start.as.num;
+  int to = len;
+  if (finish.tag != REX_NIL) {
+    if (finish.tag != REX_NUM) {
+      rex_panic("string slice expects numeric end");
+      return rex_nil();
+    }
+    to = (int)finish.as.num;
+  }
+  if (from < 0) {
+    from = 0;
+  }
+  if (from > len) {
+    from = len;
+  }
+  if (to < from) {
+    to = from;
+  }
+  if (to > len) {
+    to = len;
+  }
+  int out_len = to - from;
+  char* out = (char*)rex_xmalloc((size_t)out_len + 1u);
+  if (out_len > 0) {
+    memcpy(out, s + from, (size_t)out_len);
+  }
+  out[out_len] = '\0';
+  RexValue value = rex_str(out);
+  free(out);
+  return value;
 }
 
 RexValue rex_collections_vec_from(int count, RexValue* values) {
@@ -1676,6 +2400,46 @@ RexValue rex_collections_map_get(RexValue map, RexValue key) {
     }
   }
   return rex_nil();
+}
+
+RexValue rex_collections_get(RexValue object, RexValue index) {
+  object = rex_resolve(object);
+  if (object.tag == REX_VEC) {
+    return rex_collections_vec_get(object, index);
+  }
+  if (object.tag == REX_MAP) {
+    return rex_collections_map_get(object, index);
+  }
+  if (object.tag == REX_STR) {
+    return rex_string_get(object, index);
+  }
+  rex_panic("index expects vector, map, or string");
+  return rex_nil();
+}
+
+RexValue rex_collections_slice(RexValue object, RexValue start, RexValue finish) {
+  object = rex_resolve(object);
+  if (object.tag == REX_VEC) {
+    return rex_collections_vec_slice(object, start, finish);
+  }
+  if (object.tag == REX_STR) {
+    return rex_string_slice(object, start, finish);
+  }
+  rex_panic("slice expects vector or string");
+  return rex_nil();
+}
+
+void rex_collections_set(RexValue object, RexValue index, RexValue value) {
+  object = rex_resolve_mut(object);
+  if (object.tag == REX_VEC) {
+    rex_collections_vec_set(object, index, value);
+    return;
+  }
+  if (object.tag == REX_MAP) {
+    rex_collections_map_put(object, index, value);
+    return;
+  }
+  rex_panic("index assignment expects vector or map");
 }
 
 RexValue rex_collections_map_remove(RexValue map, RexValue key) {
@@ -3140,4 +3904,3 @@ int rex_temporal_is_expired(uint64_t start_time, uint64_t lifetime_ms) {
   uint64_t now = rex_temporal_now_ms();
   return (now - start_time) >= lifetime_ms;
 }
-

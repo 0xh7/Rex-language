@@ -1,6 +1,8 @@
 #include "rex_ui.h"
+#include "rex_audio.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,11 +11,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincodec.h>
-#include <mmsystem.h>
 #include <wchar.h>
-#define DR_MP3_IMPLEMENTATION
-#include "dr_mp3.h"
 #endif
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #define UI_FONT_W 5
 #define UI_FONT_H 7
@@ -81,6 +83,7 @@ typedef struct RexUIState {
   int height;
   int running;
   uint32_t* pixels;
+  int frame_started;
 
   int mouse_x;
   int mouse_y;
@@ -88,7 +91,16 @@ typedef struct RexUIState {
   int mouse_pressed;
   int mouse_released;
   int prev_mouse_down;
+  int mouse_buttons[REX_UI_MOUSE_BUTTONS];
+  int mouse_buttons_prev[REX_UI_MOUSE_BUTTONS];
+  int mouse_buttons_pressed[REX_UI_MOUSE_BUTTONS];
+  int mouse_buttons_released[REX_UI_MOUSE_BUTTONS];
+  int scroll_x;
   int scroll_y;
+  int key_states[REX_UI_KEY_MAX];
+  int key_prev_states[REX_UI_KEY_MAX];
+  int key_pressed_states[REX_UI_KEY_MAX];
+  int key_released_states[REX_UI_KEY_MAX];
   int key_tab;
   int key_enter;
   int key_space;
@@ -199,14 +211,6 @@ typedef struct RexUIImage {
 #ifdef _WIN32
 static int ui_wic_inited = 0;
 static IWICImagingFactory* ui_wic = NULL;
-typedef struct RexUISound {
-  HWAVEOUT handle;
-  WAVEHDR header;
-  drmp3_int16* data;
-  size_t data_size;
-} RexUISound;
-static RexUISound ui_sound = { 0 };
-
 static void ui_wic_init(void) {
   if (ui_wic_inited) {
     return;
@@ -245,91 +249,6 @@ static wchar_t* ui_widen_path(const char* path) {
   }
   return wpath;
 }
-
-static void ui_sound_stop(void) {
-  if (ui_sound.handle) {
-    waveOutReset(ui_sound.handle);
-    if (ui_sound.header.dwFlags & WHDR_PREPARED) {
-      waveOutUnprepareHeader(ui_sound.handle, &ui_sound.header, sizeof(ui_sound.header));
-    }
-    waveOutClose(ui_sound.handle);
-    ui_sound.handle = NULL;
-  }
-  if (ui_sound.data) {
-    free(ui_sound.data);
-    ui_sound.data = NULL;
-  }
-  ui_sound.data_size = 0;
-  memset(&ui_sound.header, 0, sizeof(ui_sound.header));
-}
-
-static int ui_play_mp3(const wchar_t* path) {
-  if (!path) {
-    return 0;
-  }
-  drmp3 mp3;
-  if (!drmp3_init_file_w(&mp3, path, NULL)) {
-    return 0;
-  }
-  drmp3_uint64 frame_count = drmp3_get_pcm_frame_count(&mp3);
-  if (frame_count == 0) {
-    drmp3_uninit(&mp3);
-    return 0;
-  }
-  if (mp3.channels == 0 || mp3.sampleRate == 0) {
-    drmp3_uninit(&mp3);
-    return 0;
-  }
-  if (frame_count > (drmp3_uint64)(SIZE_MAX / (mp3.channels * sizeof(drmp3_int16)))) {
-    drmp3_uninit(&mp3);
-    return 0;
-  }
-  size_t total_samples = (size_t)frame_count * (size_t)mp3.channels;
-  size_t total_bytes = total_samples * sizeof(drmp3_int16);
-  drmp3_int16* data = (drmp3_int16*)malloc(total_bytes);
-  if (!data) {
-    drmp3_uninit(&mp3);
-    return 0;
-  }
-  drmp3_uint64 frames_read = drmp3_read_pcm_frames_s16(&mp3, frame_count, data);
-  drmp3_uninit(&mp3);
-  if (frames_read == 0) {
-    free(data);
-    return 0;
-  }
-  size_t samples_read = (size_t)frames_read * (size_t)mp3.channels;
-  size_t bytes_read = samples_read * sizeof(drmp3_int16);
-
-  ui_sound_stop();
-
-  WAVEFORMATEX wf;
-  memset(&wf, 0, sizeof(wf));
-  wf.wFormatTag = WAVE_FORMAT_PCM;
-  wf.nChannels = (WORD)mp3.channels;
-  wf.nSamplesPerSec = (DWORD)mp3.sampleRate;
-  wf.wBitsPerSample = 16;
-  wf.nBlockAlign = (wf.nChannels * wf.wBitsPerSample) / 8;
-  wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-  if (waveOutOpen(&ui_sound.handle, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-    free(data);
-    return 0;
-  }
-  ui_sound.data = data;
-  ui_sound.data_size = bytes_read;
-  memset(&ui_sound.header, 0, sizeof(ui_sound.header));
-  ui_sound.header.lpData = (LPSTR)ui_sound.data;
-  ui_sound.header.dwBufferLength = (DWORD)ui_sound.data_size;
-  if (waveOutPrepareHeader(ui_sound.handle, &ui_sound.header, sizeof(ui_sound.header)) != MMSYSERR_NOERROR) {
-    ui_sound_stop();
-    return 0;
-  }
-  if (waveOutWrite(ui_sound.handle, &ui_sound.header, sizeof(ui_sound.header)) != MMSYSERR_NOERROR) {
-    ui_sound_stop();
-    return 0;
-  }
-  return 1;
-}
-
 static RexUIImage* ui_image_load_wic(const char* path) {
   ui_wic_init();
   if (!ui_wic) {
@@ -438,6 +357,40 @@ done:
   return out;
 }
 #endif
+
+static RexUIImage* ui_image_load_stb(const char* path) {
+  int w = 0;
+  int h = 0;
+  int channels = 0;
+  stbi_uc* rgba = stbi_load(path, &w, &h, &channels, 4);
+  if (!rgba || w <= 0 || h <= 0) {
+    stbi_image_free(rgba);
+    return NULL;
+  }
+
+  size_t count = (size_t)w * (size_t)h;
+  if (count > ((SIZE_MAX - sizeof(RexUIImage)) / sizeof(uint32_t))) {
+    stbi_image_free(rgba);
+    return NULL;
+  }
+
+  RexUIImage* out = (RexUIImage*)malloc(sizeof(RexUIImage) + count * sizeof(uint32_t));
+  if (!out) {
+    stbi_image_free(rgba);
+    return NULL;
+  }
+  out->w = w;
+  out->h = h;
+  for (size_t i = 0; i < count; i++) {
+    uint8_t r = rgba[i * 4u + 0u];
+    uint8_t g = rgba[i * 4u + 1u];
+    uint8_t b = rgba[i * 4u + 2u];
+    uint8_t a = rgba[i * 4u + 3u];
+    out->pixels[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+  }
+  stbi_image_free(rgba);
+  return out;
+}
 
 static const RexUITheme ui_theme_dark = {
   0xFF1E1E1E,
@@ -595,6 +548,201 @@ static const char* ui_value_to_cstr(RexValue v) {
   }
   snprintf(buf, sizeof(buffers[0]), "<value>");
   return buf;
+}
+
+static int ui_key_name_is_sep(char c) {
+  return c == '_' || c == '-' || c == ' ';
+}
+
+static int ui_key_name_match(const char* name, const char* key) {
+  if (!name || !key) {
+    return 0;
+  }
+  while (*name && *key) {
+    while (*name && ui_key_name_is_sep(*name)) {
+      name++;
+    }
+    while (*key && ui_key_name_is_sep(*key)) {
+      key++;
+    }
+    if (!*name || !*key) {
+      break;
+    }
+    char a = (char)tolower((unsigned char)*name);
+    char b = (char)tolower((unsigned char)*key);
+    if (a != b) {
+      return 0;
+    }
+    name++;
+    key++;
+  }
+  while (*name && ui_key_name_is_sep(*name)) {
+    name++;
+  }
+  while (*key && ui_key_name_is_sep(*key)) {
+    key++;
+  }
+  return *name == '\0' && *key == '\0';
+}
+
+static int ui_key_code_from_name(const char* name) {
+  if (!name || !name[0]) {
+    return REX_KEY_UNKNOWN;
+  }
+  if (ui_key_name_match(name, "space")) return REX_KEY_SPACE;
+  if (ui_key_name_match(name, "tab")) return REX_KEY_TAB;
+  if (ui_key_name_match(name, "enter") || ui_key_name_match(name, "return")) return REX_KEY_ENTER;
+  if (ui_key_name_match(name, "escape") || ui_key_name_match(name, "esc")) return REX_KEY_ESCAPE;
+  if (ui_key_name_match(name, "backspace")) return REX_KEY_BACKSPACE;
+  if (ui_key_name_match(name, "insert")) return REX_KEY_INSERT;
+  if (ui_key_name_match(name, "delete") || ui_key_name_match(name, "del")) return REX_KEY_DELETE;
+  if (ui_key_name_match(name, "home")) return REX_KEY_HOME;
+  if (ui_key_name_match(name, "end")) return REX_KEY_END;
+  if (ui_key_name_match(name, "pageup")) return REX_KEY_PAGE_UP;
+  if (ui_key_name_match(name, "pagedown")) return REX_KEY_PAGE_DOWN;
+  if (ui_key_name_match(name, "pgup")) return REX_KEY_PAGE_UP;
+  if (ui_key_name_match(name, "pgdn")) return REX_KEY_PAGE_DOWN;
+  if (ui_key_name_match(name, "up")) return REX_KEY_UP;
+  if (ui_key_name_match(name, "down")) return REX_KEY_DOWN;
+  if (ui_key_name_match(name, "left")) return REX_KEY_LEFT;
+  if (ui_key_name_match(name, "right")) return REX_KEY_RIGHT;
+  if (ui_key_name_match(name, "capslock")) return REX_KEY_CAPS_LOCK;
+  if (ui_key_name_match(name, "scrolllock")) return REX_KEY_SCROLL_LOCK;
+  if (ui_key_name_match(name, "numlock")) return REX_KEY_NUM_LOCK;
+  if (ui_key_name_match(name, "printscreen")) return REX_KEY_PRINT_SCREEN;
+  if (ui_key_name_match(name, "pause")) return REX_KEY_PAUSE;
+  if (ui_key_name_match(name, "lshift") || ui_key_name_match(name, "leftshift")) return REX_KEY_LEFT_SHIFT;
+  if (ui_key_name_match(name, "rshift") || ui_key_name_match(name, "rightshift")) return REX_KEY_RIGHT_SHIFT;
+  if (ui_key_name_match(name, "shift")) return REX_KEY_LEFT_SHIFT;
+  if (ui_key_name_match(name, "lctrl") || ui_key_name_match(name, "leftctrl") || ui_key_name_match(name, "lcontrol") || ui_key_name_match(name, "leftcontrol")) return REX_KEY_LEFT_CONTROL;
+  if (ui_key_name_match(name, "rctrl") || ui_key_name_match(name, "rightctrl") || ui_key_name_match(name, "rcontrol") || ui_key_name_match(name, "rightcontrol")) return REX_KEY_RIGHT_CONTROL;
+  if (ui_key_name_match(name, "ctrl") || ui_key_name_match(name, "control")) return REX_KEY_LEFT_CONTROL;
+  if (ui_key_name_match(name, "lalt") || ui_key_name_match(name, "leftalt") || ui_key_name_match(name, "loption") || ui_key_name_match(name, "leftoption")) return REX_KEY_LEFT_ALT;
+  if (ui_key_name_match(name, "ralt") || ui_key_name_match(name, "rightalt") || ui_key_name_match(name, "roption") || ui_key_name_match(name, "rightoption")) return REX_KEY_RIGHT_ALT;
+  if (ui_key_name_match(name, "alt") || ui_key_name_match(name, "option")) return REX_KEY_LEFT_ALT;
+  if (ui_key_name_match(name, "lsuper") || ui_key_name_match(name, "leftsuper") || ui_key_name_match(name, "lmeta") || ui_key_name_match(name, "leftmeta")) return REX_KEY_LEFT_SUPER;
+  if (ui_key_name_match(name, "rsuper") || ui_key_name_match(name, "rightsuper") || ui_key_name_match(name, "rmeta") || ui_key_name_match(name, "rightmeta")) return REX_KEY_RIGHT_SUPER;
+  if (ui_key_name_match(name, "super") || ui_key_name_match(name, "meta") || ui_key_name_match(name, "cmd") || ui_key_name_match(name, "command")) return REX_KEY_LEFT_SUPER;
+  if (ui_key_name_match(name, "menu")) return REX_KEY_MENU;
+  if (ui_key_name_match(name, "comma")) return REX_KEY_COMMA;
+  if (ui_key_name_match(name, "minus")) return REX_KEY_MINUS;
+  if (ui_key_name_match(name, "period") || ui_key_name_match(name, "dot")) return REX_KEY_PERIOD;
+  if (ui_key_name_match(name, "slash")) return REX_KEY_SLASH;
+  if (ui_key_name_match(name, "semicolon")) return REX_KEY_SEMICOLON;
+  if (ui_key_name_match(name, "equal")) return REX_KEY_EQUAL;
+  if (ui_key_name_match(name, "apostrophe") || ui_key_name_match(name, "quote")) return REX_KEY_APOSTROPHE;
+  if (ui_key_name_match(name, "lbracket") || ui_key_name_match(name, "leftbracket")) return REX_KEY_LEFT_BRACKET;
+  if (ui_key_name_match(name, "rbracket") || ui_key_name_match(name, "rightbracket")) return REX_KEY_RIGHT_BRACKET;
+  if (ui_key_name_match(name, "backslash")) return REX_KEY_BACKSLASH;
+  if (ui_key_name_match(name, "grave") || ui_key_name_match(name, "tilde")) return REX_KEY_GRAVE_ACCENT;
+
+  if ((name[0] == 'f' || name[0] == 'F') && name[1] != '\0') {
+    int num = atoi(name + 1);
+    if (num >= 1 && num <= 25) {
+      return REX_KEY_F1 + (num - 1);
+    }
+  }
+
+  if (ui_key_name_match(name, "kp0") || ui_key_name_match(name, "numpad0")) return REX_KEY_KP_0;
+  if (ui_key_name_match(name, "kp1") || ui_key_name_match(name, "numpad1")) return REX_KEY_KP_1;
+  if (ui_key_name_match(name, "kp2") || ui_key_name_match(name, "numpad2")) return REX_KEY_KP_2;
+  if (ui_key_name_match(name, "kp3") || ui_key_name_match(name, "numpad3")) return REX_KEY_KP_3;
+  if (ui_key_name_match(name, "kp4") || ui_key_name_match(name, "numpad4")) return REX_KEY_KP_4;
+  if (ui_key_name_match(name, "kp5") || ui_key_name_match(name, "numpad5")) return REX_KEY_KP_5;
+  if (ui_key_name_match(name, "kp6") || ui_key_name_match(name, "numpad6")) return REX_KEY_KP_6;
+  if (ui_key_name_match(name, "kp7") || ui_key_name_match(name, "numpad7")) return REX_KEY_KP_7;
+  if (ui_key_name_match(name, "kp8") || ui_key_name_match(name, "numpad8")) return REX_KEY_KP_8;
+  if (ui_key_name_match(name, "kp9") || ui_key_name_match(name, "numpad9")) return REX_KEY_KP_9;
+  if (ui_key_name_match(name, "kpdecimal")) return REX_KEY_KP_DECIMAL;
+  if (ui_key_name_match(name, "kpdivide")) return REX_KEY_KP_DIVIDE;
+  if (ui_key_name_match(name, "kpmultiply")) return REX_KEY_KP_MULTIPLY;
+  if (ui_key_name_match(name, "kpsubtract")) return REX_KEY_KP_SUBTRACT;
+  if (ui_key_name_match(name, "kpadd")) return REX_KEY_KP_ADD;
+  if (ui_key_name_match(name, "kpenter")) return REX_KEY_KP_ENTER;
+  if (ui_key_name_match(name, "kpequal")) return REX_KEY_KP_EQUAL;
+
+  if (name[1] == '\0') {
+    unsigned char c = (unsigned char)name[0];
+    if (c >= 'a' && c <= 'z') {
+      return (int)(c - 'a' + 'A');
+    }
+    if (c >= 'A' && c <= 'Z') {
+      return (int)c;
+    }
+    if (c >= '0' && c <= '9') {
+      return (int)c;
+    }
+    switch (c) {
+      case ' ': return REX_KEY_SPACE;
+      case '\'': return REX_KEY_APOSTROPHE;
+      case ',': return REX_KEY_COMMA;
+      case '-': return REX_KEY_MINUS;
+      case '.': return REX_KEY_PERIOD;
+      case '/': return REX_KEY_SLASH;
+      case ';': return REX_KEY_SEMICOLON;
+      case '=': return REX_KEY_EQUAL;
+      case '[': return REX_KEY_LEFT_BRACKET;
+      case '\\': return REX_KEY_BACKSLASH;
+      case ']': return REX_KEY_RIGHT_BRACKET;
+      case '`': return REX_KEY_GRAVE_ACCENT;
+      default: break;
+    }
+  }
+  return REX_KEY_UNKNOWN;
+}
+
+static int ui_key_code_from_value(RexValue v, int* ok) {
+  v = ui_resolve(v);
+  if (v.tag == REX_NUM) {
+    if (ok) {
+      *ok = 1;
+    }
+    return (int)v.as.num;
+  }
+  if (v.tag == REX_STR) {
+    int code = ui_key_code_from_name(v.as.str ? v.as.str : "");
+    if (ok) {
+      *ok = (code != REX_KEY_UNKNOWN);
+    }
+    return code;
+  }
+  if (ok) {
+    *ok = 0;
+  }
+  return REX_KEY_UNKNOWN;
+}
+
+static int ui_mouse_button_from_name(const char* name) {
+  if (!name || !name[0]) {
+    return -1;
+  }
+  if (ui_key_name_match(name, "left")) return REX_MOUSE_LEFT;
+  if (ui_key_name_match(name, "right")) return REX_MOUSE_RIGHT;
+  if (ui_key_name_match(name, "middle") || ui_key_name_match(name, "mid")) return REX_MOUSE_MIDDLE;
+  if (ui_key_name_match(name, "x1") || ui_key_name_match(name, "button4") || ui_key_name_match(name, "mouse4")) return REX_MOUSE_BUTTON_4;
+  if (ui_key_name_match(name, "x2") || ui_key_name_match(name, "button5") || ui_key_name_match(name, "mouse5")) return REX_MOUSE_BUTTON_5;
+  return -1;
+}
+
+static int ui_mouse_button_from_value(RexValue v, int* ok) {
+  v = ui_resolve(v);
+  if (v.tag == REX_NUM) {
+    if (ok) {
+      *ok = 1;
+    }
+    return (int)v.as.num;
+  }
+  if (v.tag == REX_STR) {
+    int code = ui_mouse_button_from_name(v.as.str ? v.as.str : "");
+    if (ok) {
+      *ok = (code >= 0);
+    }
+    return code;
+  }
+  if (ok) {
+    *ok = 0;
+  }
+  return -1;
 }
 
 static int ui_font_scale(void) {
@@ -807,10 +955,11 @@ static void ui_draw_frame(RexUIRect r, uint32_t color) {
 }
 
 static void ui_draw_char(int x, int y, char c, uint32_t color) {
-  if (c < 32 || c > 127) {
-    c = '?';
+  unsigned char uc = (unsigned char)c;
+  if (uc < 32 || uc > 127) {
+    uc = '?';
   }
-  const uint8_t* glyph = ui_font[c - 32];
+  const uint8_t* glyph = ui_font[uc - 32];
   int scale = ui_font_scale();
   for (int col = 0; col < UI_FONT_W; col++) {
     uint8_t bits = glyph[col];
@@ -1110,6 +1259,7 @@ static void ui_start_frame(void) {
   ui.clip_depth = 0;
   ui.layout_depth = 0;
   ui.draw_enabled = ui.dirty;
+  ui.frame_started = 1;
   if (ui.draw_enabled) {
     ui_clear(ui.theme.bg);
   }
@@ -1148,7 +1298,7 @@ static void ui_end_frame(void) {
   if (ui.draw_enabled) {
     rex_ui_platform_present(ui.pixels, ui.width, ui.height);
   }
-
+  ui.frame_started = 0;
 }
 
 static int ui_poll_input(void) {
@@ -1180,7 +1330,7 @@ static int ui_poll_input(void) {
       ui.dirty = 1;
     }
   }
-  if (input.scroll_y != 0) {
+  if (input.scroll_x != 0 || input.scroll_y != 0) {
     ui.dirty = 1;
   }
   if (input.redraw) {
@@ -1191,27 +1341,46 @@ static int ui_poll_input(void) {
   }
   ui.mouse_x = input.mouse_x;
   ui.mouse_y = input.mouse_y;
-  ui.mouse_down = input.mouse_down;
-  ui.mouse_pressed = (!ui.prev_mouse_down && ui.mouse_down);
-  ui.mouse_released = (ui.prev_mouse_down && !ui.mouse_down);
-  ui.prev_mouse_down = ui.mouse_down;
-  if (ui.mouse_pressed || ui.mouse_released) {
-    ui.dirty = 1;
+  if (input.mouse_down) {
+    input.mouse_buttons[REX_MOUSE_LEFT] = 1;
   }
+  for (int i = 0; i < REX_UI_MOUSE_BUTTONS; i++) {
+    ui.mouse_buttons[i] = input.mouse_buttons[i];
+    ui.mouse_buttons_pressed[i] = ui.mouse_buttons[i] && !ui.mouse_buttons_prev[i];
+    ui.mouse_buttons_released[i] = !ui.mouse_buttons[i] && ui.mouse_buttons_prev[i];
+    ui.mouse_buttons_prev[i] = ui.mouse_buttons[i];
+    if (ui.mouse_buttons_pressed[i] || ui.mouse_buttons_released[i]) {
+      ui.dirty = 1;
+    }
+  }
+  ui.mouse_down = ui.mouse_buttons[REX_MOUSE_LEFT] || input.mouse_down;
+  ui.mouse_pressed = ui.mouse_buttons_pressed[REX_MOUSE_LEFT];
+  ui.mouse_released = ui.mouse_buttons_released[REX_MOUSE_LEFT];
+  ui.prev_mouse_down = ui.mouse_down;
+  ui.scroll_x = input.scroll_x;
   ui.scroll_y = input.scroll_y;
-  ui.key_tab_down = input.key_tab;
-  ui.key_enter_down = input.key_enter;
-  ui.key_space_down = input.key_space;
-  ui.key_up_down = input.key_up;
-  ui.key_down_down = input.key_down;
-  ui.key_backspace_down = input.key_backspace;
-  ui.key_delete_down = input.key_delete;
-  ui.key_left_down = input.key_left;
-  ui.key_right_down = input.key_right;
-  ui.key_home_down = input.key_home;
-  ui.key_end_down = input.key_end;
-  ui.key_ctrl = input.key_ctrl;
-  ui.key_shift = input.key_shift;
+  for (int i = 0; i < REX_UI_KEY_MAX; i++) {
+    ui.key_states[i] = input.key_states[i];
+    ui.key_pressed_states[i] = ui.key_states[i] && !ui.key_prev_states[i];
+    ui.key_released_states[i] = !ui.key_states[i] && ui.key_prev_states[i];
+    ui.key_prev_states[i] = ui.key_states[i];
+    if (ui.key_pressed_states[i] || ui.key_released_states[i]) {
+      ui.dirty = 1;
+    }
+  }
+  ui.key_tab_down = input.key_tab || ui.key_states[REX_KEY_TAB];
+  ui.key_enter_down = input.key_enter || ui.key_states[REX_KEY_ENTER];
+  ui.key_space_down = input.key_space || ui.key_states[REX_KEY_SPACE];
+  ui.key_up_down = input.key_up || ui.key_states[REX_KEY_UP];
+  ui.key_down_down = input.key_down || ui.key_states[REX_KEY_DOWN];
+  ui.key_backspace_down = input.key_backspace || ui.key_states[REX_KEY_BACKSPACE];
+  ui.key_delete_down = input.key_delete || ui.key_states[REX_KEY_DELETE];
+  ui.key_left_down = input.key_left || ui.key_states[REX_KEY_LEFT];
+  ui.key_right_down = input.key_right || ui.key_states[REX_KEY_RIGHT];
+  ui.key_home_down = input.key_home || ui.key_states[REX_KEY_HOME];
+  ui.key_end_down = input.key_end || ui.key_states[REX_KEY_END];
+  ui.key_ctrl = input.key_ctrl || ui.key_states[REX_KEY_LEFT_CONTROL] || ui.key_states[REX_KEY_RIGHT_CONTROL];
+  ui.key_shift = input.key_shift || ui.key_states[REX_KEY_LEFT_SHIFT] || ui.key_states[REX_KEY_RIGHT_SHIFT];
   double now = ui_now_ms();
   ui.key_tab = ui.key_tab_down && !ui.key_tab_prev;
   ui.key_enter = ui.key_enter_down && !ui.key_enter_prev;
@@ -1337,6 +1506,135 @@ static void ui_draw_image(RexUIImage* img, int x, int y) {
   }
 }
 
+static void ui_draw_image_rot(RexUIImage* img, double cx, double cy, double angle_deg) {
+  if (!img || !ui.pixels || !ui.draw_enabled) {
+    return;
+  }
+  int iw = img->w;
+  int ih = img->h;
+  if (iw <= 0 || ih <= 0) {
+    return;
+  }
+
+  double rad = angle_deg * (3.14159265358979323846 / 180.0);
+  double ca = cos(rad);
+  double sa = sin(rad);
+  double hw = iw * 0.5;
+  double hh = ih * 0.5;
+
+  double x0 = -hw;
+  double y0 = -hh;
+  double x1 = hw;
+  double y1 = -hh;
+  double x2 = hw;
+  double y2 = hh;
+  double x3 = -hw;
+  double y3 = hh;
+
+  double rx0 = x0 * ca - y0 * sa;
+  double ry0 = x0 * sa + y0 * ca;
+  double rx1 = x1 * ca - y1 * sa;
+  double ry1 = x1 * sa + y1 * ca;
+  double rx2 = x2 * ca - y2 * sa;
+  double ry2 = x2 * sa + y2 * ca;
+  double rx3 = x3 * ca - y3 * sa;
+  double ry3 = x3 * sa + y3 * ca;
+
+  double min_x = rx0;
+  double max_x = rx0;
+  double min_y = ry0;
+  double max_y = ry0;
+  if (rx1 < min_x) min_x = rx1;
+  if (rx1 > max_x) max_x = rx1;
+  if (ry1 < min_y) min_y = ry1;
+  if (ry1 > max_y) max_y = ry1;
+  if (rx2 < min_x) min_x = rx2;
+  if (rx2 > max_x) max_x = rx2;
+  if (ry2 < min_y) min_y = ry2;
+  if (ry2 > max_y) max_y = ry2;
+  if (rx3 < min_x) min_x = rx3;
+  if (rx3 > max_x) max_x = rx3;
+  if (ry3 < min_y) min_y = ry3;
+  if (ry3 > max_y) max_y = ry3;
+
+  int x_start = (int)floor(cx + min_x);
+  int y_start = (int)floor(cy + min_y);
+  int x_end = (int)ceil(cx + max_x);
+  int y_end = (int)ceil(cy + max_y);
+
+  RexUIRect clip = ui.clip;
+  int clip_x1 = clip.x + clip.w;
+  int clip_y1 = clip.y + clip.h;
+  if (x_start < clip.x) {
+    x_start = clip.x;
+  }
+  if (y_start < clip.y) {
+    y_start = clip.y;
+  }
+  if (x_end > clip_x1) {
+    x_end = clip_x1;
+  }
+  if (y_end > clip_y1) {
+    y_end = clip_y1;
+  }
+  if (x_start < 0) {
+    x_start = 0;
+  }
+  if (y_start < 0) {
+    y_start = 0;
+  }
+  if (x_end > ui.width) {
+    x_end = ui.width;
+  }
+  if (y_end > ui.height) {
+    y_end = ui.height;
+  }
+  if (x_end <= x_start || y_end <= y_start) {
+    return;
+  }
+
+  for (int yy = y_start; yy < y_end; yy++) {
+    double dy = (double)yy - cy;
+    uint32_t* dst = ui.pixels + yy * ui.width + x_start;
+    for (int xx = x_start; xx < x_end; xx++) {
+      double dx = (double)xx - cx;
+      double src_x = dx * ca + dy * sa + hw;
+      double src_y = -dx * sa + dy * ca + hh;
+      int sx = (int)floor(src_x);
+      int sy = (int)floor(src_y);
+      if (sx < 0 || sx >= iw || sy < 0 || sy >= ih) {
+        dst++;
+        continue;
+      }
+      uint32_t s = img->pixels[sy * iw + sx];
+      if (ui.invert) {
+        s = (s & 0xFF000000u) | (~s & 0x00FFFFFFu);
+      }
+      uint32_t a = (s >> 24) & 0xFFu;
+      if (a == 0) {
+        dst++;
+        continue;
+      }
+      if (a == 255) {
+        *dst++ = s;
+        continue;
+      }
+      uint32_t d = *dst;
+      uint32_t sr = (s >> 16) & 0xFFu;
+      uint32_t sg = (s >> 8) & 0xFFu;
+      uint32_t sb = s & 0xFFu;
+      uint32_t dr = (d >> 16) & 0xFFu;
+      uint32_t dg = (d >> 8) & 0xFFu;
+      uint32_t db = d & 0xFFu;
+      uint32_t inv = 255u - a;
+      uint32_t r = (sr * a + dr * inv) / 255u;
+      uint32_t g = (sg * a + dg * inv) / 255u;
+      uint32_t b = (sb * a + db * inv) / 255u;
+      *dst++ = 0xFF000000u | (r << 16) | (g << 8) | b;
+    }
+  }
+}
+
 static void ui_draw_image_region(RexUIImage* img, int sx, int sy, int sw, int sh, int x, int y, int w, int h) {
   if (!img || !ui.pixels || !ui.draw_enabled) {
     return;
@@ -1434,6 +1732,9 @@ RexValue rex_ui_begin(RexValue title, RexValue width, RexValue height) {
     rex_panic("ui.begin expects (string, number, number)");
     return rex_bool(0);
   }
+  if (ui.frame_started) {
+    ui_end_frame();
+  }
   int w = (int)width.as.num;
   int h = (int)height.as.num;
   if (w <= 0 || h <= 0) {
@@ -1480,6 +1781,46 @@ RexValue rex_ui_key_down(void) {
   return rex_bool(ui.key_down != 0);
 }
 
+RexValue rex_ui_key_code(RexValue name) {
+  name = ui_resolve(name);
+  if (name.tag != REX_STR || !name.as.str) {
+    rex_panic("ui.key_code expects string");
+    return rex_num((double)REX_KEY_UNKNOWN);
+  }
+  int code = ui_key_code_from_name(name.as.str);
+  return rex_num((double)code);
+}
+
+RexValue rex_ui_key_is_down(RexValue key) {
+  int ok = 0;
+  int code = ui_key_code_from_value(key, &ok);
+  if (!ok || code < 0 || code >= REX_UI_KEY_MAX) {
+    rex_panic("ui.key_is_down expects key code or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.key_states[code] != 0);
+}
+
+RexValue rex_ui_key_pressed(RexValue key) {
+  int ok = 0;
+  int code = ui_key_code_from_value(key, &ok);
+  if (!ok || code < 0 || code >= REX_UI_KEY_MAX) {
+    rex_panic("ui.key_pressed expects key code or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.key_pressed_states[code] != 0);
+}
+
+RexValue rex_ui_key_released(RexValue key) {
+  int ok = 0;
+  int code = ui_key_code_from_value(key, &ok);
+  if (!ok || code < 0 || code >= REX_UI_KEY_MAX) {
+    rex_panic("ui.key_released expects key code or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.key_released_states[code] != 0);
+}
+
 RexValue rex_ui_mouse_x(void) {
   return rex_num((double)ui.mouse_x);
 }
@@ -1498,6 +1839,44 @@ RexValue rex_ui_mouse_pressed(void) {
 
 RexValue rex_ui_mouse_released(void) {
   return rex_bool(ui.mouse_released != 0);
+}
+
+RexValue rex_ui_mouse_is_down(RexValue button) {
+  int ok = 0;
+  int index = ui_mouse_button_from_value(button, &ok);
+  if (!ok || index < 0 || index >= REX_UI_MOUSE_BUTTONS) {
+    rex_panic("ui.mouse_is_down expects button index or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.mouse_buttons[index] != 0);
+}
+
+RexValue rex_ui_mouse_pressed_btn(RexValue button) {
+  int ok = 0;
+  int index = ui_mouse_button_from_value(button, &ok);
+  if (!ok || index < 0 || index >= REX_UI_MOUSE_BUTTONS) {
+    rex_panic("ui.mouse_pressed_btn expects button index or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.mouse_buttons_pressed[index] != 0);
+}
+
+RexValue rex_ui_mouse_released_btn(RexValue button) {
+  int ok = 0;
+  int index = ui_mouse_button_from_value(button, &ok);
+  if (!ok || index < 0 || index >= REX_UI_MOUSE_BUTTONS) {
+    rex_panic("ui.mouse_released_btn expects button index or name");
+    return rex_bool(0);
+  }
+  return rex_bool(ui.mouse_buttons_released[index] != 0);
+}
+
+RexValue rex_ui_scroll_x(void) {
+  return rex_num((double)ui.scroll_x);
+}
+
+RexValue rex_ui_scroll_y(void) {
+  return rex_num((double)ui.scroll_y);
 }
 
 RexValue rex_ui_label(RexValue text) {
@@ -1521,6 +1900,20 @@ RexValue rex_ui_text(RexValue x, RexValue y, RexValue text, RexValue color) {
     return rex_nil();
   }
   ui_draw_text((int)x.as.num, (int)y.as.num, t, c);
+  return rex_nil();
+}
+
+RexValue rex_ui_rect(RexValue x, RexValue y, RexValue w, RexValue h, RexValue color) {
+  x = ui_resolve(x);
+  y = ui_resolve(y);
+  w = ui_resolve(w);
+  h = ui_resolve(h);
+  if (x.tag != REX_NUM || y.tag != REX_NUM || w.tag != REX_NUM || h.tag != REX_NUM) {
+    rex_panic("ui.rect expects (number, number, number, number, color)");
+    return rex_nil();
+  }
+  uint32_t c = ui_color_from_value(color, ui.theme.panel);
+  ui_draw_rect((int)x.as.num, (int)y.as.num, (int)w.as.num, (int)h.as.num, c);
   return rex_nil();
 }
 
@@ -2684,8 +3077,16 @@ RexValue rex_ui_image_load(RexValue path) {
   img = ui_image_load_wic(path.as.str);
 #endif
   if (!img) {
+    img = ui_image_load_stb(path.as.str);
+  }
+  if (!img) {
+    const char* reason = stbi_failure_reason();
     char buf[256];
-    snprintf(buf, sizeof(buf), "ui.image_load failed: %s", path.as.str);
+    if (reason && reason[0] != '\0') {
+      snprintf(buf, sizeof(buf), "ui.image_load failed: %s (%s)", path.as.str, reason);
+    } else {
+      snprintf(buf, sizeof(buf), "ui.image_load failed: %s", path.as.str);
+    }
     rex_panic(buf);
     return rex_nil();
   }
@@ -2724,6 +3125,19 @@ RexValue rex_ui_image(RexValue img, RexValue x, RexValue y) {
   return rex_nil();
 }
 
+RexValue rex_ui_image_rot(RexValue img, RexValue x, RexValue y, RexValue angle_deg) {
+  img = ui_resolve(img);
+  x = ui_resolve(x);
+  y = ui_resolve(y);
+  angle_deg = ui_resolve(angle_deg);
+  if (img.tag != REX_PTR || !img.as.ptr || x.tag != REX_NUM || y.tag != REX_NUM || angle_deg.tag != REX_NUM) {
+    rex_panic("ui.image_rot expects (image, number, number, number)");
+    return rex_nil();
+  }
+  ui_draw_image_rot((RexUIImage*)img.as.ptr, x.as.num, y.as.num, angle_deg.as.num);
+  return rex_nil();
+}
+
 RexValue rex_ui_image_region(RexValue img, RexValue sx, RexValue sy, RexValue sw, RexValue sh, RexValue x, RexValue y, RexValue w, RexValue h) {
   img = ui_resolve(img);
   sx = ui_resolve(sx);
@@ -2748,46 +3162,5 @@ RexValue rex_ui_play_sound(RexValue path) {
     rex_panic("ui.play_sound expects string path");
     return rex_bool(0);
   }
-#ifdef _WIN32
-  const char* p = path.as.str;
-  size_t len = strlen(p);
-  const char* ext = len >= 4 ? p + (len - 4) : NULL;
-  int is_mp3 = 0;
-  if (ext) {
-    is_mp3 =
-      (tolower((unsigned char)ext[0]) == '.' &&
-       tolower((unsigned char)ext[1]) == 'm' &&
-       tolower((unsigned char)ext[2]) == 'p' &&
-       tolower((unsigned char)ext[3]) == '3');
-  }
-  wchar_t* wpath = ui_widen_path(p);
-  if (!wpath) {
-    return rex_bool(0);
-  }
-  wchar_t fullbuf[MAX_PATH];
-  wchar_t* fullpath = wpath;
-  wchar_t* fullalloc = NULL;
-  DWORD full_len = GetFullPathNameW(wpath, MAX_PATH, fullbuf, NULL);
-  if (full_len > 0 && full_len < MAX_PATH) {
-    fullpath = fullbuf;
-  } else if (full_len >= MAX_PATH) {
-    fullalloc = (wchar_t*)malloc((full_len + 1) * sizeof(wchar_t));
-    if (fullalloc && GetFullPathNameW(wpath, full_len + 1, fullalloc, NULL) > 0) {
-      fullpath = fullalloc;
-    }
-  }
-  int ok = 0;
-  if (is_mp3) {
-    ok = ui_play_mp3(fullpath);
-  } else {
-    ui_sound_stop();
-    ok = PlaySoundW(fullpath, NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != FALSE;
-  }
-  free(wpath);
-  free(fullalloc);
-  return rex_bool(ok != 0);
-#else
-  (void)path;
-  return rex_bool(0);
-#endif
+  return rex_bool(rex_audio_platform_play(path.as.str) != 0);
 }

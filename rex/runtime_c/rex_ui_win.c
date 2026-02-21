@@ -13,7 +13,10 @@ static int ui_mouse_y = 0;
 static int ui_mouse_down = 0;
 static char ui_text[REX_UI_TEXT_MAX];
 static int ui_text_len = 0;
+static int ui_scroll_x = 0;
 static int ui_scroll_y = 0;
+static int ui_key_states[REX_UI_KEY_MAX];
+static int ui_mouse_buttons[REX_UI_MOUSE_BUTTONS];
 static int ui_key_tab = 0;
 static int ui_key_enter = 0;
 static int ui_key_space = 0;
@@ -106,6 +109,114 @@ static void ui_clear_key_state(void) {
   ui_key_right = 0;
   ui_key_home = 0;
   ui_key_end = 0;
+  memset(ui_key_states, 0, sizeof(ui_key_states));
+  memset(ui_mouse_buttons, 0, sizeof(ui_mouse_buttons));
+  ui_mouse_down = 0;
+}
+
+static int ui_keycode_from_vk(WPARAM vk, LPARAM lparam) {
+  if (vk >= 'A' && vk <= 'Z') {
+    return (int)vk;
+  }
+  if (vk >= '0' && vk <= '9') {
+    return (int)vk;
+  }
+  if (vk == VK_SHIFT) {
+    UINT scancode = (lparam >> 16) & 0xFFu;
+    vk = MapVirtualKey(scancode, MAPVK_VSC_TO_VK_EX);
+  } else if (vk == VK_CONTROL) {
+    vk = (lparam & 0x01000000) ? VK_RCONTROL : VK_LCONTROL;
+  } else if (vk == VK_MENU) {
+    vk = (lparam & 0x01000000) ? VK_RMENU : VK_LMENU;
+  }
+  switch (vk) {
+    case VK_ESCAPE: return REX_KEY_ESCAPE;
+    case VK_RETURN:
+      if (lparam & 0x01000000) {
+        return REX_KEY_KP_ENTER;
+      }
+      return REX_KEY_ENTER;
+    case VK_TAB: return REX_KEY_TAB;
+    case VK_BACK: return REX_KEY_BACKSPACE;
+    case VK_INSERT: return REX_KEY_INSERT;
+    case VK_DELETE: return REX_KEY_DELETE;
+    case VK_RIGHT: return REX_KEY_RIGHT;
+    case VK_LEFT: return REX_KEY_LEFT;
+    case VK_DOWN: return REX_KEY_DOWN;
+    case VK_UP: return REX_KEY_UP;
+    case VK_PRIOR: return REX_KEY_PAGE_UP;
+    case VK_NEXT: return REX_KEY_PAGE_DOWN;
+    case VK_HOME: return REX_KEY_HOME;
+    case VK_END: return REX_KEY_END;
+    case VK_CAPITAL: return REX_KEY_CAPS_LOCK;
+    case VK_SCROLL: return REX_KEY_SCROLL_LOCK;
+    case VK_NUMLOCK: return REX_KEY_NUM_LOCK;
+    case VK_SNAPSHOT: return REX_KEY_PRINT_SCREEN;
+    case VK_PAUSE: return REX_KEY_PAUSE;
+    case VK_F1: return REX_KEY_F1;
+    case VK_F2: return REX_KEY_F2;
+    case VK_F3: return REX_KEY_F3;
+    case VK_F4: return REX_KEY_F4;
+    case VK_F5: return REX_KEY_F5;
+    case VK_F6: return REX_KEY_F6;
+    case VK_F7: return REX_KEY_F7;
+    case VK_F8: return REX_KEY_F8;
+    case VK_F9: return REX_KEY_F9;
+    case VK_F10: return REX_KEY_F10;
+    case VK_F11: return REX_KEY_F11;
+    case VK_F12: return REX_KEY_F12;
+    case VK_F13: return REX_KEY_F13;
+    case VK_F14: return REX_KEY_F14;
+    case VK_F15: return REX_KEY_F15;
+    case VK_F16: return REX_KEY_F16;
+    case VK_F17: return REX_KEY_F17;
+    case VK_F18: return REX_KEY_F18;
+    case VK_F19: return REX_KEY_F19;
+    case VK_F20: return REX_KEY_F20;
+    case VK_F21: return REX_KEY_F21;
+    case VK_F22: return REX_KEY_F22;
+    case VK_F23: return REX_KEY_F23;
+    case VK_F24: return REX_KEY_F24;
+    case VK_NUMPAD0: return REX_KEY_KP_0;
+    case VK_NUMPAD1: return REX_KEY_KP_1;
+    case VK_NUMPAD2: return REX_KEY_KP_2;
+    case VK_NUMPAD3: return REX_KEY_KP_3;
+    case VK_NUMPAD4: return REX_KEY_KP_4;
+    case VK_NUMPAD5: return REX_KEY_KP_5;
+    case VK_NUMPAD6: return REX_KEY_KP_6;
+    case VK_NUMPAD7: return REX_KEY_KP_7;
+    case VK_NUMPAD8: return REX_KEY_KP_8;
+    case VK_NUMPAD9: return REX_KEY_KP_9;
+    case VK_DECIMAL: return REX_KEY_KP_DECIMAL;
+    case VK_DIVIDE: return REX_KEY_KP_DIVIDE;
+    case VK_MULTIPLY: return REX_KEY_KP_MULTIPLY;
+    case VK_SUBTRACT: return REX_KEY_KP_SUBTRACT;
+    case VK_ADD: return REX_KEY_KP_ADD;
+    case VK_SEPARATOR: return REX_KEY_KP_ENTER;
+    case VK_LSHIFT: return REX_KEY_LEFT_SHIFT;
+    case VK_RSHIFT: return REX_KEY_RIGHT_SHIFT;
+    case VK_LCONTROL: return REX_KEY_LEFT_CONTROL;
+    case VK_RCONTROL: return REX_KEY_RIGHT_CONTROL;
+    case VK_LMENU: return REX_KEY_LEFT_ALT;
+    case VK_RMENU: return REX_KEY_RIGHT_ALT;
+    case VK_LWIN: return REX_KEY_LEFT_SUPER;
+    case VK_RWIN: return REX_KEY_RIGHT_SUPER;
+    case VK_APPS: return REX_KEY_MENU;
+    case VK_OEM_1: return REX_KEY_SEMICOLON;
+    case VK_OEM_PLUS: return REX_KEY_EQUAL;
+    case VK_OEM_COMMA: return REX_KEY_COMMA;
+    case VK_OEM_MINUS: return REX_KEY_MINUS;
+    case VK_OEM_PERIOD: return REX_KEY_PERIOD;
+    case VK_OEM_2: return REX_KEY_SLASH;
+    case VK_OEM_3: return REX_KEY_GRAVE_ACCENT;
+    case VK_OEM_4: return REX_KEY_LEFT_BRACKET;
+    case VK_OEM_5: return REX_KEY_BACKSLASH;
+    case VK_OEM_102: return REX_KEY_BACKSLASH;
+    case VK_OEM_6: return REX_KEY_RIGHT_BRACKET;
+    case VK_OEM_7: return REX_KEY_APOSTROPHE;
+    default: break;
+  }
+  return REX_KEY_UNKNOWN;
 }
 
 static LRESULT CALLBACK rex_ui_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -129,19 +240,56 @@ static LRESULT CALLBACK rex_ui_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
       return 0;
     case WM_LBUTTONDOWN:
       ui_mouse_down = 1;
+      ui_mouse_buttons[REX_MOUSE_LEFT] = 1;
       SetCapture(hwnd);
       return 0;
     case WM_LBUTTONUP:
       ui_mouse_down = 0;
+      ui_mouse_buttons[REX_MOUSE_LEFT] = 0;
       ReleaseCapture();
+      return 0;
+    case WM_RBUTTONDOWN:
+      ui_mouse_buttons[REX_MOUSE_RIGHT] = 1;
+      return 0;
+    case WM_RBUTTONUP:
+      ui_mouse_buttons[REX_MOUSE_RIGHT] = 0;
+      return 0;
+    case WM_MBUTTONDOWN:
+      ui_mouse_buttons[REX_MOUSE_MIDDLE] = 1;
+      return 0;
+    case WM_MBUTTONUP:
+      ui_mouse_buttons[REX_MOUSE_MIDDLE] = 0;
+      return 0;
+    case WM_XBUTTONDOWN:
+      if (GET_XBUTTON_WPARAM(wparam) == XBUTTON1) {
+        ui_mouse_buttons[REX_MOUSE_BUTTON_4] = 1;
+      } else if (GET_XBUTTON_WPARAM(wparam) == XBUTTON2) {
+        ui_mouse_buttons[REX_MOUSE_BUTTON_5] = 1;
+      }
+      return 0;
+    case WM_XBUTTONUP:
+      if (GET_XBUTTON_WPARAM(wparam) == XBUTTON1) {
+        ui_mouse_buttons[REX_MOUSE_BUTTON_4] = 0;
+      } else if (GET_XBUTTON_WPARAM(wparam) == XBUTTON2) {
+        ui_mouse_buttons[REX_MOUSE_BUTTON_5] = 0;
+      }
       return 0;
     case WM_MOUSEWHEEL: {
       int delta = GET_WHEEL_DELTA_WPARAM(wparam);
       ui_scroll_y += delta / WHEEL_DELTA;
       return 0;
     }
+    case WM_MOUSEHWHEEL: {
+      int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+      ui_scroll_x += delta / WHEEL_DELTA;
+      return 0;
+    }
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
+      int code = ui_keycode_from_vk(wparam, lparam);
+      if (code >= 0 && code < REX_UI_KEY_MAX) {
+        ui_key_states[code] = 1;
+      }
       int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
       switch (wparam) {
         case VK_TAB: ui_key_tab = 1; break;
@@ -165,6 +313,12 @@ static LRESULT CALLBACK rex_ui_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
     }
     case WM_KEYUP:
     case WM_SYSKEYUP:
+      {
+        int code = ui_keycode_from_vk(wparam, lparam);
+        if (code >= 0 && code < REX_UI_KEY_MAX) {
+          ui_key_states[code] = 0;
+        }
+      }
       switch (wparam) {
         case VK_TAB: ui_key_tab = 0; break;
         case VK_RETURN: ui_key_enter = 0; break;
@@ -296,6 +450,7 @@ void rex_ui_platform_shutdown(void) {
 
 int rex_ui_platform_poll(RexUIPlatformInput* input) {
   ui_text_len = 0;
+  ui_scroll_x = 0;
   ui_scroll_y = 0;
   ui_key_copy = 0;
   ui_key_paste = 0;
@@ -332,7 +487,12 @@ int rex_ui_platform_poll(RexUIPlatformInput* input) {
   input->mouse_x = ui_mouse_x;
   input->mouse_y = ui_mouse_y;
   input->mouse_down = ui_mouse_down;
+  for (int i = 0; i < REX_UI_MOUSE_BUTTONS; i++) {
+    input->mouse_buttons[i] = ui_mouse_buttons[i];
+  }
+  input->scroll_x = ui_scroll_x;
   input->scroll_y = ui_scroll_y;
+  memcpy(input->key_states, ui_key_states, sizeof(ui_key_states));
   input->key_tab = ui_key_tab;
   input->key_enter = ui_key_enter;
   input->key_space = ui_key_space;

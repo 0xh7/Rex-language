@@ -1,6 +1,5 @@
 -- C code generator for Rex language AST 
--- How about that Rex team ? :D 
- 
+
 local Codegen = {}
 
 local function indent_line(ctx, text)
@@ -94,7 +93,8 @@ function Codegen.generate(ast, opts)
     spawn_used = false,
     scopes = { {} },
     defer_stack = { {} },
-    bond_stack = { {} },
+    bonds = {},
+    active_bond_stack = {},
     active_bond = nil,
     structs = structs,
     methods = methods,
@@ -105,6 +105,7 @@ function Codegen.generate(ast, opts)
     imports = {},
     name_counters = {},
     current_bindings = { {} },
+    block_tail_stack = {},
     builtins = {
       println = "rex_println",
       print = "rex_print",
@@ -137,6 +138,10 @@ function Codegen.generate(ast, opts)
         exists = "rex_fs_exists",
         mkdir = "rex_fs_mkdir",
         remove = "rex_fs_remove",
+        is_dir = "rex_fs_is_dir",
+        read_dir = "rex_fs_read_dir",
+        copy = "rex_fs_copy",
+        move = "rex_fs_move",
       },
       thread = { channel = "rex_channel", wait_all = "rex_wait_all" },
       time = {
@@ -155,7 +160,7 @@ function Codegen.generate(ast, opts)
         unbox = "rex_unbox",
         drop = "rex_drop",
       },
-      math = { sqrt = "rex_sqrt", abs = "rex_abs" },
+      math = { sqrt = "rex_sqrt", abs = "rex_abs", eval = "rex_math_eval" },
       collections = {
         vec_new = "rex_collections_vec_new",
         vec_push = "rex_collections_vec_push",
@@ -179,7 +184,38 @@ function Codegen.generate(ast, opts)
         set_has = "rex_collections_set_has",
         set_remove = "rex_collections_set_remove",
       },
-      os = { getenv = "rex_os_getenv", cwd = "rex_os_cwd" },
+      os = {
+        getenv = "rex_os_getenv",
+        cwd = "rex_os_cwd",
+        platform = "rex_os_platform",
+        args = "rex_os_args",
+        home = "rex_os_home",
+        temp_dir = "rex_os_temp_dir",
+      },
+      path = {
+        join = "rex_path_join",
+        basename = "rex_path_basename",
+        dirname = "rex_path_dirname",
+        ext = "rex_path_ext",
+        stem = "rex_path_stem",
+        is_abs = "rex_path_is_abs",
+      },
+      audio = {
+        play = "rex_audio_play",
+        play_loop = "rex_audio_play_loop",
+        stop = "rex_audio_stop",
+        supports = "rex_audio_supports",
+        set_volume = "rex_audio_set_volume",
+        volume = "rex_audio_get_volume",
+      },
+      log = {
+        debug = "rex_log_debug",
+        info = "rex_log_info",
+        warn = "rex_log_warn",
+        error = "rex_log_error",
+        set_level = "rex_log_set_level",
+        level = "rex_log_get_level",
+      },
       net = { tcp_connect = "rex_net_tcp_connect", udp_socket = "rex_net_udp_socket" },
       http = { get = "rex_http_get", get_status = "rex_http_get_status", get_json = "rex_http_get_json" },
       random = {
@@ -201,13 +237,23 @@ function Codegen.generate(ast, opts)
         key_space = "rex_ui_key_space",
         key_up = "rex_ui_key_up",
         key_down = "rex_ui_key_down",
+        key_code = "rex_ui_key_code",
+        key_is_down = "rex_ui_key_is_down",
+        key_pressed = "rex_ui_key_pressed",
+        key_released = "rex_ui_key_released",
         mouse_x = "rex_ui_mouse_x",
         mouse_y = "rex_ui_mouse_y",
         mouse_down = "rex_ui_mouse_down",
         mouse_pressed = "rex_ui_mouse_pressed",
         mouse_released = "rex_ui_mouse_released",
+        mouse_is_down = "rex_ui_mouse_is_down",
+        mouse_pressed_btn = "rex_ui_mouse_pressed_btn",
+        mouse_released_btn = "rex_ui_mouse_released_btn",
+        scroll_x = "rex_ui_scroll_x",
+        scroll_y = "rex_ui_scroll_y",
         label = "rex_ui_label",
         text = "rex_ui_text",
+        rect = "rex_ui_rect",
         button = "rex_ui_button",
         checkbox = "rex_ui_checkbox",
         radio = "rex_ui_radio",
@@ -240,6 +286,7 @@ function Codegen.generate(ast, opts)
         image_w = "rex_ui_image_w",
         image_h = "rex_ui_image_h",
         image = "rex_ui_image",
+        image_rot = "rex_ui_image_rot",
         image_region = "rex_ui_image_region",
         play_sound = "rex_ui_play_sound",
       },
@@ -312,6 +359,151 @@ function Codegen.generate(ast, opts)
       return binding.c_name
     end
     return rex_name  
+  end
+
+  local numeric_types = {
+    num = true,
+    f32 = true,
+    f64 = true,
+    i8 = true,
+    i16 = true,
+    i32 = true,
+    i64 = true,
+    u8 = true,
+    u16 = true,
+    u32 = true,
+    u64 = true,
+  }
+
+  local function normalize_codegen_type(t)
+    if not t then
+      return "unknown"
+    end
+    if numeric_types[t] then
+      return "num"
+    end
+    if t == "string" then
+      return "str"
+    end
+    return t
+  end
+
+  local infer_expr_type
+
+  local function emit_binary_fallback(op, left, right)
+    if op == "+" then
+      return "rex_add(" .. left .. ", " .. right .. ")"
+    elseif op == "-" then
+      return "rex_sub(" .. left .. ", " .. right .. ")"
+    elseif op == "*" then
+      return "rex_mul(" .. left .. ", " .. right .. ")"
+    elseif op == "/" then
+      return "rex_div(" .. left .. ", " .. right .. ")"
+    elseif op == "%" then
+      return "rex_mod(" .. left .. ", " .. right .. ")"
+    elseif op == "==" then
+      return "rex_eq(" .. left .. ", " .. right .. ")"
+    elseif op == "!=" then
+      return "rex_neq(" .. left .. ", " .. right .. ")"
+    elseif op == "<" then
+      return "rex_lt(" .. left .. ", " .. right .. ")"
+    elseif op == "<=" then
+      return "rex_lte(" .. left .. ", " .. right .. ")"
+    elseif op == ">" then
+      return "rex_gt(" .. left .. ", " .. right .. ")"
+    elseif op == ">=" then
+      return "rex_gte(" .. left .. ", " .. right .. ")"
+    elseif op == "&&" then
+      return "rex_and(" .. left .. ", " .. right .. ")"
+    elseif op == "||" then
+      return "rex_or(" .. left .. ", " .. right .. ")"
+    end
+    error("Unknown binary op: " .. op)
+  end
+
+  local function emit_binary_typed(op, left, right, left_type, right_type)
+    if left_type == "num" and right_type == "num" then
+      if op == "+" then
+        return "rex_num((" .. left .. ").as.num + (" .. right .. ").as.num)"
+      elseif op == "-" then
+        return "rex_num((" .. left .. ").as.num - (" .. right .. ").as.num)"
+      elseif op == "*" then
+        return "rex_num((" .. left .. ").as.num * (" .. right .. ").as.num)"
+      elseif op == "/" then
+        return "rex_num((" .. left .. ").as.num / (" .. right .. ").as.num)"
+      elseif op == "%" then
+        return "rex_num(fmod((" .. left .. ").as.num, (" .. right .. ").as.num))"
+      elseif op == "==" then
+        return "rex_bool((" .. left .. ").as.num == (" .. right .. ").as.num)"
+      elseif op == "!=" then
+        return "rex_bool((" .. left .. ").as.num != (" .. right .. ").as.num)"
+      elseif op == "<" then
+        return "rex_bool((" .. left .. ").as.num < (" .. right .. ").as.num)"
+      elseif op == "<=" then
+        return "rex_bool((" .. left .. ").as.num <= (" .. right .. ").as.num)"
+      elseif op == ">" then
+        return "rex_bool((" .. left .. ").as.num > (" .. right .. ").as.num)"
+      elseif op == ">=" then
+        return "rex_bool((" .. left .. ").as.num >= (" .. right .. ").as.num)"
+      end
+    end
+    if left_type == "bool" and right_type == "bool" then
+      if op == "&&" then
+        return "rex_bool((" .. left .. ").as.boolean && (" .. right .. ").as.boolean)"
+      elseif op == "||" then
+        return "rex_bool((" .. left .. ").as.boolean || (" .. right .. ").as.boolean)"
+      elseif op == "==" then
+        return "rex_bool((" .. left .. ").as.boolean == (" .. right .. ").as.boolean)"
+      elseif op == "!=" then
+        return "rex_bool((" .. left .. ").as.boolean != (" .. right .. ").as.boolean)"
+      end
+    end
+    return emit_binary_fallback(op, left, right)
+  end
+
+  infer_expr_type = function(expr)
+    if not expr then
+      return "unknown"
+    end
+    if expr.kind == "Number" then
+      return "num"
+    elseif expr.kind == "Bool" then
+      return "bool"
+    elseif expr.kind == "String" then
+      return "str"
+    elseif expr.kind == "Identifier" then
+      return normalize_codegen_type(scope_get(ctx, expr.name))
+    elseif expr.kind == "Borrow" then
+      return "unknown"
+    elseif expr.kind == "Unary" then
+      if expr.op == "-" and infer_expr_type(expr.expr) == "num" then
+        return "num"
+      elseif expr.op == "!" then
+        return "bool"
+      end
+      return "unknown"
+    elseif expr.kind == "Binary" then
+      local lt = infer_expr_type(expr.left)
+      local rt = infer_expr_type(expr.right)
+      if expr.op == "+" then
+        if lt == "num" and rt == "num" then
+          return "num"
+        end
+        if lt == "str" or rt == "str" then
+          return "str"
+        end
+      elseif expr.op == "-" or expr.op == "*" or expr.op == "/" or expr.op == "%" then
+        if lt == "num" and rt == "num" then
+          return "num"
+        end
+      elseif expr.op == "==" or expr.op == "!=" or expr.op == "<" or expr.op == "<=" or expr.op == ">" or expr.op == ">=" then
+        return "bool"
+      elseif expr.op == "&&" or expr.op == "||" then
+        return "bool"
+      end
+      return "unknown"
+    end
+    return "unknown"
   end
 
   for name, _ in pairs(functions) do
@@ -498,6 +690,14 @@ function Codegen.generate(ast, opts)
   local emit_all_defers
   local emit_expr
 
+  local function can_emit_tail_return()
+    local frame = ctx.block_tail_stack[#ctx.block_tail_stack]
+    if not frame then
+      return false
+    end
+    return frame.allow_tail_return and frame.index == frame.count
+  end
+
   local function emit_expr_raw(expr)
     if expr.kind == "Bool" then
       return expr.value and "rex_bool(1)" or "rex_bool(0)"
@@ -520,35 +720,9 @@ function Codegen.generate(ast, opts)
     elseif expr.kind == "Binary" then
       local left = emit_expr_raw(expr.left)
       local right = emit_expr_raw(expr.right)
-      local op = expr.op
-      if op == "+" then
-        return "rex_add(" .. left .. ", " .. right .. ")"
-      elseif op == "-" then
-        return "rex_sub(" .. left .. ", " .. right .. ")"
-      elseif op == "*" then
-        return "rex_mul(" .. left .. ", " .. right .. ")"
-      elseif op == "/" then
-        return "rex_div(" .. left .. ", " .. right .. ")"
-      elseif op == "%" then
-        return "rex_mod(" .. left .. ", " .. right .. ")"
-      elseif op == "==" then
-        return "rex_eq(" .. left .. ", " .. right .. ")"
-      elseif op == "!=" then
-        return "rex_neq(" .. left .. ", " .. right .. ")"
-      elseif op == "<" then
-        return "rex_lt(" .. left .. ", " .. right .. ")"
-      elseif op == "<=" then
-        return "rex_lte(" .. left .. ", " .. right .. ")"
-      elseif op == ">" then
-        return "rex_gt(" .. left .. ", " .. right .. ")"
-      elseif op == ">=" then
-        return "rex_gte(" .. left .. ", " .. right .. ")"
-      elseif op == "&&" then
-        return "rex_and(" .. left .. ", " .. right .. ")"
-      elseif op == "||" then
-        return "rex_or(" .. left .. ", " .. right .. ")"
-      end
-      error("Unknown binary op: " .. op)
+      local left_type = infer_expr_type(expr.left)
+      local right_type = infer_expr_type(expr.right)
+      return emit_binary_typed(expr.op, left, right, left_type, right_type)
     elseif expr.kind == "Unary" then
       if expr.op == "-" then
         return "rex_neg(" .. emit_expr_raw(expr.expr) .. ")"
@@ -681,13 +855,13 @@ function Codegen.generate(ast, opts)
       end
       return "rex_struct_get(" .. emit_expr_raw(expr.object) .. ", " .. c_string(expr.property) .. ")"
     elseif expr.kind == "Index" then
-      return "rex_collections_vec_get(" .. emit_expr_raw(expr.object) .. ", " .. emit_expr_raw(expr.index) .. ")"
+      return "rex_collections_get(" .. emit_expr_raw(expr.object) .. ", " .. emit_expr_raw(expr.index) .. ")"
     elseif expr.kind == "Slice" then
       local finish = "rex_nil()"
       if expr.finish then
         finish = emit_expr_raw(expr.finish)
       end
-      return "rex_collections_vec_slice(" .. emit_expr_raw(expr.object) .. ", " .. emit_expr_raw(expr.start) .. ", " .. finish .. ")"
+      return "rex_collections_slice(" .. emit_expr_raw(expr.object) .. ", " .. emit_expr_raw(expr.start) .. ", " .. finish .. ")"
     elseif expr.kind == "Try" then
       return "rex_try(" .. emit_expr_raw(expr.expr) .. ")"
     elseif expr.kind == "Generic" then
@@ -739,35 +913,9 @@ function Codegen.generate(ast, opts)
     elseif expr.kind == "Binary" then
       local left = emit_expr(expr.left)
       local right = emit_expr(expr.right)
-      local op = expr.op
-      if op == "+" then
-        return "rex_add(" .. left .. ", " .. right .. ")"
-      elseif op == "-" then
-        return "rex_sub(" .. left .. ", " .. right .. ")"
-      elseif op == "*" then
-        return "rex_mul(" .. left .. ", " .. right .. ")"
-      elseif op == "/" then
-        return "rex_div(" .. left .. ", " .. right .. ")"
-      elseif op == "%" then
-        return "rex_mod(" .. left .. ", " .. right .. ")"
-      elseif op == "==" then
-        return "rex_eq(" .. left .. ", " .. right .. ")"
-      elseif op == "!=" then
-        return "rex_neq(" .. left .. ", " .. right .. ")"
-      elseif op == "<" then
-        return "rex_lt(" .. left .. ", " .. right .. ")"
-      elseif op == "<=" then
-        return "rex_lte(" .. left .. ", " .. right .. ")"
-      elseif op == ">" then
-        return "rex_gt(" .. left .. ", " .. right .. ")"
-      elseif op == ">=" then
-        return "rex_gte(" .. left .. ", " .. right .. ")"
-      elseif op == "&&" then
-        return "rex_and(" .. left .. ", " .. right .. ")"
-      elseif op == "||" then
-        return "rex_or(" .. left .. ", " .. right .. ")"
-      end
-      error("Unknown binary op: " .. op)
+      local left_type = infer_expr_type(expr.left)
+      local right_type = infer_expr_type(expr.right)
+      return emit_binary_typed(expr.op, left, right, left_type, right_type)
     elseif expr.kind == "Unary" then
       if expr.op == "-" then
         return "rex_neg(" .. emit_expr(expr.expr) .. ")"
@@ -900,13 +1048,13 @@ function Codegen.generate(ast, opts)
       end
       return "rex_struct_get(" .. emit_expr(expr.object) .. ", " .. c_string(expr.property) .. ")"
     elseif expr.kind == "Index" then
-      return "rex_collections_vec_get(" .. emit_expr(expr.object) .. ", " .. emit_expr(expr.index) .. ")"
+      return "rex_collections_get(" .. emit_expr(expr.object) .. ", " .. emit_expr(expr.index) .. ")"
     elseif expr.kind == "Slice" then
       local finish = "rex_nil()"
       if expr.finish then
         finish = emit_expr(expr.finish)
       end
-      return "rex_collections_vec_slice(" .. emit_expr(expr.object) .. ", " .. emit_expr(expr.start) .. ", " .. finish .. ")"
+      return "rex_collections_slice(" .. emit_expr(expr.object) .. ", " .. emit_expr(expr.start) .. ", " .. finish .. ")"
     elseif expr.kind == "Generic" then
       return emit_expr(expr.expr)
     end
@@ -933,7 +1081,7 @@ function Codegen.generate(ast, opts)
     end
   end
 
-  emit_block = function(block, new_scope, prelude)
+  emit_block = function(block, new_scope, prelude, allow_tail_return)
     if new_scope then
       table.insert(ctx.scopes, {})
       table.insert(ctx.defer_stack, {})
@@ -944,10 +1092,25 @@ function Codegen.generate(ast, opts)
     elseif prelude then
       prelude()
     end
-    for _, stmt in ipairs(block.statements) do
+    local statements = block.statements or {}
+    table.insert(ctx.block_tail_stack, {
+      allow_tail_return = allow_tail_return and true or false,
+      index = 0,
+      count = #statements,
+    })
+    for i, stmt in ipairs(statements) do
+      ctx.block_tail_stack[#ctx.block_tail_stack].index = i
       ctx.emit_stmt(stmt)
     end
+    table.remove(ctx.block_tail_stack)
     if new_scope then
+      local active_id = ctx.active_bond_stack[#ctx.active_bond_stack]
+      if active_id then
+        local active_bond = ctx.bonds[active_id]
+        if active_bond and active_bond.scope_depth == #ctx.current_bindings then
+          error("Bond '" .. (active_bond.name or tostring(active_id)) .. "' left scope without commit/rollback")
+        end
+      end
       emit_defer_list(ctx.defer_stack[#ctx.defer_stack])
       table.remove(ctx.defer_stack)
       table.remove(ctx.scopes)
@@ -1093,7 +1256,13 @@ function Codegen.generate(ast, opts)
         indent_line(ctx, "RexValue " .. c_name .. " = " .. value .. ";")
         local base = type_base(stmt.type)
         local type_annotation = "unknown"
-        if base and ctx.structs[base] then
+        if base and numeric_types[base] then
+          type_annotation = "num"
+        elseif base == "bool" then
+          type_annotation = "bool"
+        elseif base == "str" or base == "string" then
+          type_annotation = "str"
+        elseif base and ctx.structs[base] then
           type_annotation = "struct:" .. base
         elseif base and ctx.enums[base] then
           type_annotation = "enum:" .. base
@@ -1105,6 +1274,8 @@ function Codegen.generate(ast, opts)
             local inferred = infer_enum_name(stmt.value)
             if inferred then
               type_annotation = "enum:" .. inferred
+            else
+              type_annotation = infer_expr_type(stmt.value)
             end
           end
         end
@@ -1157,26 +1328,49 @@ function Codegen.generate(ast, opts)
       end
       ctx.bond_id = ctx.bond_id + 1
       local bid = ctx.bond_id
+      local actions_var = "__rex_bond_actions_" .. bid
+      local count_var = "__rex_bond_count_" .. bid
+      local cap_var = "__rex_bond_cap_" .. bid
+      indent_line(ctx, "RexBondAction* " .. actions_var .. " = NULL;")
+      indent_line(ctx, "int " .. count_var .. " = 0;")
+      indent_line(ctx, "int " .. cap_var .. " = 0;")
       local value = emit_expr(stmt.value)
       local c_name = get_c_name(ctx, stmt.name)
       indent_line(ctx, "RexValue " .. c_name .. " = " .. value .. ";")
       
       scope_set_binding(ctx, stmt.name, c_name, "bond:" .. bid)
-      table.insert(ctx.bond_stack[#ctx.bond_stack], bid)
+      ctx.bonds[bid] = {
+        id = bid,
+        name = stmt.name,
+        c_name = c_name,
+        actions_var = actions_var,
+        count_var = count_var,
+        cap_var = cap_var,
+        scope_depth = #ctx.current_bindings,
+      }
+      table.insert(ctx.active_bond_stack, bid)
       ctx.active_bond = bid
     elseif stmt.kind == "Commit" then
    
       if ctx.active_bond then
-        indent_line(ctx, "// bond " .. ctx.active_bond .. " committed")
-        table.remove(ctx.bond_stack[#ctx.bond_stack])
-        ctx.active_bond = nil
+        local bond = ctx.bonds[ctx.active_bond]
+        if bond then
+          indent_line(ctx, "__rex_bond_reset(&" .. bond.actions_var .. ", &" .. bond.count_var .. ", &" .. bond.cap_var .. ");")
+        end
+        table.remove(ctx.active_bond_stack)
+        ctx.active_bond = ctx.active_bond_stack[#ctx.active_bond_stack]
       end
     elseif stmt.kind == "Rollback" then
       --  undo all changes in bond
       if ctx.active_bond then
-        indent_line(ctx, "// bond " .. ctx.active_bond .. " rolled back")
-        table.remove(ctx.bond_stack[#ctx.bond_stack])
-        ctx.active_bond = nil
+        local bond = ctx.bonds[ctx.active_bond]
+        if bond then
+          indent_line(ctx, "__rex_bond_apply_rollback(" .. bond.actions_var .. ", " .. bond.count_var .. ");")
+          indent_line(ctx, "__rex_bond_reset(&" .. bond.actions_var .. ", &" .. bond.count_var .. ", &" .. bond.cap_var .. ");")
+          indent_line(ctx, bond.c_name .. " = rex_nil();")
+        end
+        table.remove(ctx.active_bond_stack)
+        ctx.active_bond = ctx.active_bond_stack[#ctx.active_bond_stack]
       end
     elseif stmt.kind == "Return" then
       emit_all_defers()
@@ -1188,11 +1382,51 @@ function Codegen.generate(ast, opts)
     elseif stmt.kind == "ExprStmt" then
       indent_line(ctx, emit_expr(stmt.expr) .. ";")
     elseif stmt.kind == "Assign" then
-      indent_line(ctx, get_c_ident(ctx, stmt.name) .. " = " .. emit_expr(stmt.value) .. ";")
+      local target = get_c_ident(ctx, stmt.name)
+      if ctx.active_bond then
+        local bond = ctx.bonds[ctx.active_bond]
+        if bond then
+          indent_line(
+            ctx,
+            "__rex_bond_push_assign(&" .. bond.actions_var .. ", &" .. bond.count_var .. ", &" .. bond.cap_var .. ", &" .. target .. ", " .. target .. ");"
+          )
+        end
+      end
+      indent_line(ctx, target .. " = " .. emit_expr(stmt.value) .. ";")
     elseif stmt.kind == "MemberAssign" then
-      indent_line(ctx, "rex_struct_set(" .. emit_expr(stmt.object) .. ", " .. c_string(stmt.property) .. ", " .. emit_expr(stmt.value) .. ");")
+      local obj_expr = emit_expr(stmt.object)
+      local field_lit = c_string(stmt.property)
+      if ctx.active_bond then
+        local bond = ctx.bonds[ctx.active_bond]
+        if bond then
+          indent_line(
+            ctx,
+            "__rex_bond_push_member(&" .. bond.actions_var .. ", &" .. bond.count_var .. ", &" .. bond.cap_var .. ", "
+              .. obj_expr .. ", " .. field_lit .. ", rex_struct_get(" .. obj_expr .. ", " .. field_lit .. "));"
+          )
+        end
+      end
+      indent_line(ctx, "rex_struct_set(" .. obj_expr .. ", " .. field_lit .. ", " .. emit_expr(stmt.value) .. ");")
     elseif stmt.kind == "IndexAssign" then
-      indent_line(ctx, "rex_collections_vec_set(" .. emit_expr(stmt.object) .. ", " .. emit_expr(stmt.index) .. ", " .. emit_expr(stmt.value) .. ");")
+      local obj_expr = emit_expr(stmt.object)
+      if ctx.active_bond then
+        local bond = ctx.bonds[ctx.active_bond]
+        if bond then
+          ctx.tmp_id = ctx.tmp_id + 1
+          local idx_tmp = "__bond_idx_" .. ctx.tmp_id
+          indent_line(ctx, "RexValue " .. idx_tmp .. " = " .. emit_expr(stmt.index) .. ";")
+          indent_line(
+            ctx,
+            "__rex_bond_push_index(&" .. bond.actions_var .. ", &" .. bond.count_var .. ", &" .. bond.cap_var .. ", "
+              .. obj_expr .. ", " .. idx_tmp .. ", rex_collections_get(" .. obj_expr .. ", " .. idx_tmp .. "));"
+          )
+          indent_line(ctx, "rex_collections_set(" .. obj_expr .. ", " .. idx_tmp .. ", " .. emit_expr(stmt.value) .. ");")
+        else
+          indent_line(ctx, "rex_collections_set(" .. obj_expr .. ", " .. emit_expr(stmt.index) .. ", " .. emit_expr(stmt.value) .. ");")
+        end
+      else
+        indent_line(ctx, "rex_collections_set(" .. obj_expr .. ", " .. emit_expr(stmt.index) .. ", " .. emit_expr(stmt.value) .. ");")
+      end
     elseif stmt.kind == "DerefAssign" then
       indent_line(ctx, "rex_deref_assign(" .. get_c_ident(ctx, stmt.name) .. ", " .. emit_expr(stmt.value) .. ");")
     elseif stmt.kind == "Unsafe" then
@@ -1244,12 +1478,19 @@ function Codegen.generate(ast, opts)
       if stmt.range_start then
         local start_var = "__start" .. id
         local end_var = "__end" .. id
+        local start_num = "__start_num" .. id
+        local end_num = "__end_num" .. id
+        local idx_num = "__idx_num" .. id
         indent_line(ctx, "RexValue " .. start_var .. " = " .. emit_expr(stmt.range_start) .. ";")
         indent_line(ctx, "RexValue " .. end_var .. " = " .. emit_expr(stmt.range_end) .. ";")
-        indent_line(ctx, "for (RexValue " .. loop_var .. " = " .. start_var .. "; rex_is_truthy(rex_lt(" .. loop_var .. ", " .. end_var .. ")); " .. loop_var .. " = rex_add(" .. loop_var .. ", rex_num(1))) {")
+        indent_line(ctx, "if (" .. start_var .. ".tag != REX_NUM || " .. end_var .. ".tag != REX_NUM) { rex_panic(\"for range expects numbers\"); }")
+        indent_line(ctx, "double " .. start_num .. " = " .. start_var .. ".as.num;")
+        indent_line(ctx, "double " .. end_num .. " = " .. end_var .. ".as.num;")
+        indent_line(ctx, "for (double " .. idx_num .. " = " .. start_num .. "; " .. idx_num .. " < " .. end_num .. "; " .. idx_num .. " += 1.0) {")
         ctx.indent = ctx.indent + 1
+        indent_line(ctx, "RexValue " .. loop_var .. " = rex_num(" .. idx_num .. ");")
         emit_block(stmt.body, true, function()
-          scope_set_binding(ctx, stmt.name, loop_var, "unknown")
+          scope_set_binding(ctx, stmt.name, loop_var, "num")
         end)
         ctx.indent = ctx.indent - 1
         indent_line(ctx, "}")
@@ -1326,7 +1567,11 @@ function Codegen.generate(ast, opts)
             if is_void_call then
               indent_line(ctx, emit_expr(last_stmt.expr) .. ";")
             else
-              indent_line(ctx, "return " .. emit_expr(last_stmt.expr) .. ";")
+              if can_emit_tail_return() then
+                indent_line(ctx, "return " .. emit_expr(last_stmt.expr) .. ";")
+              else
+                indent_line(ctx, emit_expr(last_stmt.expr) .. ";")
+              end
             end
           else
             emit_block(arm.body, true)
@@ -1355,7 +1600,127 @@ function Codegen.generate(ast, opts)
   indent_line(ctx, "#include <stdint.h>")
   indent_line(ctx, "#include <stdlib.h>")
   indent_line(ctx, "#include <string.h>")
+  indent_line(ctx, "#include <math.h>")
   indent_line(ctx, "#include \"rex_rt.h\"")
+  indent_line(ctx, "")
+  indent_line(ctx, "typedef enum RexBondActionKind {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "REX_BOND_ASSIGN = 0,")
+  indent_line(ctx, "REX_BOND_MEMBER = 1,")
+  indent_line(ctx, "REX_BOND_INDEX = 2")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "} RexBondActionKind;")
+  indent_line(ctx, "")
+  indent_line(ctx, "typedef struct RexBondAction {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "RexBondActionKind kind;")
+  indent_line(ctx, "RexValue* slot;")
+  indent_line(ctx, "RexValue object;")
+  indent_line(ctx, "RexValue key;")
+  indent_line(ctx, "const char* field;")
+  indent_line(ctx, "RexValue old_value;")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "} RexBondAction;")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_push(RexBondAction** actions, int* count, int* cap, RexBondAction action) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "if (!actions || !count || !cap) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "rex_panic(\"invalid bond state\");")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "if (*count >= *cap) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "int next = (*cap == 0) ? 8 : (*cap * 2);")
+  indent_line(ctx, "RexBondAction* resized = (RexBondAction*)realloc(*actions, (size_t)next * sizeof(RexBondAction));")
+  indent_line(ctx, "if (!resized) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "rex_panic(\"bond out of memory\");")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "*actions = resized;")
+  indent_line(ctx, "*cap = next;")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "(*actions)[*count] = action;")
+  indent_line(ctx, "*count = *count + 1;")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_push_assign(RexBondAction** actions, int* count, int* cap, RexValue* slot, RexValue old_value) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "RexBondAction action;")
+  indent_line(ctx, "memset(&action, 0, sizeof(action));")
+  indent_line(ctx, "action.kind = REX_BOND_ASSIGN;")
+  indent_line(ctx, "action.slot = slot;")
+  indent_line(ctx, "action.old_value = old_value;")
+  indent_line(ctx, "__rex_bond_push(actions, count, cap, action);")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_push_member(RexBondAction** actions, int* count, int* cap, RexValue object, const char* field, RexValue old_value) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "RexBondAction action;")
+  indent_line(ctx, "memset(&action, 0, sizeof(action));")
+  indent_line(ctx, "action.kind = REX_BOND_MEMBER;")
+  indent_line(ctx, "action.object = object;")
+  indent_line(ctx, "action.field = field;")
+  indent_line(ctx, "action.old_value = old_value;")
+  indent_line(ctx, "__rex_bond_push(actions, count, cap, action);")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_push_index(RexBondAction** actions, int* count, int* cap, RexValue object, RexValue key, RexValue old_value) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "RexBondAction action;")
+  indent_line(ctx, "memset(&action, 0, sizeof(action));")
+  indent_line(ctx, "action.kind = REX_BOND_INDEX;")
+  indent_line(ctx, "action.object = object;")
+  indent_line(ctx, "action.key = key;")
+  indent_line(ctx, "action.old_value = old_value;")
+  indent_line(ctx, "__rex_bond_push(actions, count, cap, action);")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_apply_rollback(RexBondAction* actions, int count) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "for (int i = count - 1; i >= 0; --i) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "RexBondAction* action = &actions[i];")
+  indent_line(ctx, "if (action->kind == REX_BOND_ASSIGN) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "if (action->slot) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "*(action->slot) = action->old_value;")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "} else if (action->kind == REX_BOND_MEMBER) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "rex_struct_set(action->object, action->field, action->old_value);")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "} else if (action->kind == REX_BOND_INDEX) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "rex_collections_set(action->object, action->key, action->old_value);")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "")
+  indent_line(ctx, "static void __rex_bond_reset(RexBondAction** actions, int* count, int* cap) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "if (actions && *actions) {")
+  ctx.indent = ctx.indent + 1
+  indent_line(ctx, "free(*actions);")
+  indent_line(ctx, "*actions = NULL;")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
+  indent_line(ctx, "if (count) { *count = 0; }")
+  indent_line(ctx, "if (cap) { *cap = 0; }")
+  ctx.indent = ctx.indent - 1
+  indent_line(ctx, "}")
   indent_line(ctx, "")
 
   for struct_name, def in pairs(ctx.structs) do
@@ -1461,7 +1826,7 @@ function Codegen.generate(ast, opts)
             scope_set_binding(ctx, p.name, p.name, "unknown")
           end
         end
-        emit_block(method.body, true)
+        emit_block(method.body, true, nil, true)
         indent_line(ctx, "return rex_nil();")
         table.remove(ctx.scopes)
         table.remove(ctx.current_bindings)
@@ -1493,7 +1858,7 @@ function Codegen.generate(ast, opts)
         end
         scope_set_binding(ctx, p.name, p.name, type_annotation)
       end
-      emit_block(item.body, true)
+      emit_block(item.body, true, nil, true)
       indent_line(ctx, "return rex_nil();")
       table.remove(ctx.scopes)
       table.remove(ctx.current_bindings)
@@ -1529,8 +1894,9 @@ function Codegen.generate(ast, opts)
   end
 
   if opts.emit_entry ~= false then
-    indent_line(ctx, "int main(void) {")
+    indent_line(ctx, "int main(int argc, char** argv) {")
     ctx.indent = ctx.indent + 1
+    indent_line(ctx, "rex_os_set_args(argc, argv);")
     if has_top_level then
       indent_line(ctx, "rex_init();")
     end
