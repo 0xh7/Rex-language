@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: |
           $luaVersion = "5.4.8"
-          $luaUrl = "https://sourceforge.net/projects/luabinaries/files/$luaVersion/Tools%20Executables/lua-$luaVersion" + "_Win64_bin.zip/download"
+          $luaUrl = "https://downloads.sourceforge.net/project/luabinaries/$luaVersion/Tools%20Executables/lua-$luaVersion" + "_Win64_bin.zip"
           $toolsDir = Join-Path $PWD "dist\tools"
           $luaZip = Join-Path $toolsDir "lua-$luaVersion-win64.zip"
           $luaDir = Join-Path $toolsDir "lua-win64"
@@ -92,8 +92,33 @@ jobs:
             Remove-Item -LiteralPath $luaDir -Recurse -Force
           }
 
-          Invoke-WebRequest -Uri $luaUrl -OutFile $luaZip -MaximumRedirection 5 -TimeoutSec 120
-          Expand-Archive -LiteralPath $luaZip -DestinationPath $luaDir -Force
+          Invoke-WebRequest -Uri $luaUrl -OutFile $luaZip -MaximumRedirection 10 -TimeoutSec 180 -Headers @{ "User-Agent" = "Mozilla/5.0" }
+
+          if (-not (Test-Path $luaZip)) {
+            Write-Error "Lua zip was not downloaded."
+            exit 1
+          }
+
+          if ((Get-Item -LiteralPath $luaZip).Length -lt 1024) {
+            Write-Error "Lua zip is too small; likely a bad download."
+            exit 1
+          }
+
+          $sig = New-Object byte[] 4
+          $stream = [System.IO.File]::OpenRead($luaZip)
+          try {
+            [void]$stream.Read($sig, 0, 4)
+          } finally {
+            $stream.Dispose()
+          }
+
+          if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
+            Write-Error "Downloaded Lua file is not a ZIP archive."
+            exit 1
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($luaZip, $luaDir)
 
           $luaExeInfo = Get-ChildItem -LiteralPath $luaDir -Filter "lua*.exe" -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notlike "luac*" -and $_.Name -notlike "wlua*" } |
