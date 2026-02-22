@@ -70,7 +70,8 @@ Name: "{autodesktop}\Rex Console"; Filename: "{cmd}"; Parameters: "/K ""{app}\bi
 
 [Code]
 const
-  EnvSubKey = 'Environment';
+  UserEnvSubKey = 'Environment';
+  MachineEnvSubKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
   PathValueName = 'Path';
   REX_HWND_BROADCAST = $FFFF;
   REX_WM_SETTINGCHANGE = $001A;
@@ -90,6 +91,14 @@ function SendMessageTimeout(
 var
   RuntimePage: TWizardPage;
   RuntimeLabel: TNewStaticText;
+
+function ResolveEnvSubKey(RootKey: Integer): string;
+begin
+  if RootKey = HKLM then
+    Result := MachineEnvSubKey
+  else
+    Result := UserEnvSubKey;
+end;
 
 function SplitPathContains(const AllPaths, Entry: string): Boolean;
 var
@@ -125,7 +134,10 @@ begin
 end;
 
 function ReadPathValue(RootKey: Integer; var Value: string): Boolean;
+var
+  EnvSubKey: string;
 begin
+  EnvSubKey := ResolveEnvSubKey(RootKey);
   Result := RegQueryStringValue(RootKey, EnvSubKey, PathValueName, Value);
   if not Result then
     Value := '';
@@ -133,8 +145,9 @@ end;
 
 function AddPathEntry(RootKey: Integer; const Entry: string): Boolean;
 var
-  CurrentPath: string;
+  CurrentPath, EnvSubKey: string;
 begin
+  EnvSubKey := ResolveEnvSubKey(RootKey);
   ReadPathValue(RootKey, CurrentPath);
   if SplitPathContains(CurrentPath, Entry) then
   begin
@@ -150,9 +163,10 @@ end;
 
 function RemovePathEntry(RootKey: Integer; const Entry: string): Boolean;
 var
-  CurrentPath, OutPath, S, Item, Target: string;
+  CurrentPath, OutPath, S, Item, Target, EnvSubKey: string;
   P: Integer;
 begin
+  EnvSubKey := ResolveEnvSubKey(RootKey);
   Result := True;
   if not ReadPathValue(RootKey, CurrentPath) then
     Exit;
@@ -247,6 +261,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   RootKey: Integer;
   BinPath: string;
+  Added: Boolean;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
@@ -261,7 +276,15 @@ begin
       RootKey := HKLM
     else
       RootKey := HKCU;
-    AddPathEntry(RootKey, BinPath);
+    Added := AddPathEntry(RootKey, BinPath);
+    if (not Added) and (RootKey = HKLM) then
+    begin
+      Log('Failed to update system PATH. Retrying user PATH.');
+      Added := AddPathEntry(HKCU, BinPath);
+      RootKey := HKCU;
+    end;
+    if not Added then
+      Log('Failed to update PATH with: ' + BinPath);
     SendMessageTimeout(REX_HWND_BROADCAST, REX_WM_SETTINGCHANGE, 0, 'Environment', REX_SMTO_ABORTIFHUNG, 5000, ResultCode);
   end;
 end;
