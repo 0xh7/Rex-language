@@ -173,6 +173,7 @@ jobs:
         run: |
           $repoRoot = (Get-Location).Path
           $scriptPath = Join-Path $repoRoot "tools\install\windows\rex-installer.iss"
+          $scriptToCompile = $scriptPath
           $outDir = Join-Path $repoRoot "dist\windows"
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
@@ -195,6 +196,20 @@ jobs:
             exit 1
           }
 
+          $innoDir = Split-Path -Parent $iscc
+          $chineseIsl = Join-Path $innoDir "Languages\ChineseSimplified.isl"
+          if (-not (Test-Path $chineseIsl)) {
+            Write-Warning "ChineseSimplified.isl not found on runner. Disabling Chinese language for this CI build."
+            $scriptText = Get-Content -LiteralPath $scriptPath -Raw
+            $scriptText = $scriptText.Replace(
+              'Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"',
+              '; Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"'
+            )
+            $tempScript = Join-Path $env:RUNNER_TEMP "rex-installer-ci.iss"
+            Set-Content -LiteralPath $tempScript -Value $scriptText -Encoding UTF8
+            $scriptToCompile = $tempScript
+          }
+
           $args = @(
             "/DRepoRoot=$repoRoot",
             "/DMyAppVersion=$env:RELEASE_VERSION"
@@ -204,7 +219,7 @@ jobs:
           }
           $args += @(
             "/O$outDir",
-            $scriptPath
+            $scriptToCompile
           )
 
           & $iscc @args
