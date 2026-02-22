@@ -12,7 +12,19 @@ Prerequisites:
 - Lua 5.4+ (or compatible Lua runtime)
 - A C compiler (`cc`, `clang`, or `gcc`)
 
-Run an example:
+If you installed Rex from the Windows installer, run:
+
+```powershell
+rex run "C:\rex-lang\rex\examples\hello.rex"
+```
+
+If `rex` is not recognized in PowerShell, use:
+
+```powershell
+& "C:\Program Files\RexLang\bin\rex.cmd" run "C:\rex-lang\rex\examples\hello.rex"
+```
+
+From source checkout, run:
 
 ```bash
 cd rex

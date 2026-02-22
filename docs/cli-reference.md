@@ -1,18 +1,26 @@
 # Rex CLI Reference
 
-All commands below are run from the `rex` directory:
+Commands can be run in two ways:
+
+```bash
+rex <command> ...
+```
+
+From source checkout, use:
 
 ```bash
 cd rex
 lua compiler/cli/rex.lua <command> ...
 ```
 
+Examples below use the installed form (`rex ...`).
+
 ## 1. `init`
 
 Create a new project skeleton.
 
 ```bash
-lua compiler/cli/rex.lua init <dir>
+rex init <dir>
 ```
 
 Creates:
@@ -24,7 +32,7 @@ Creates:
 Parse + typecheck + generate C, and (by default) compile native binary.
 
 ```bash
-lua compiler/cli/rex.lua build [input] [options]
+rex build [input] [options]
 ```
 
 Default input:
@@ -41,9 +49,9 @@ Options:
 Examples:
 
 ```bash
-lua compiler/cli/rex.lua build examples/hello.rex
-lua compiler/cli/rex.lua build examples/hello.rex --no-native --c-out build/hello.c
-lua compiler/cli/rex.lua build src/main.rex --mode debug --cc clang
+rex build examples/hello.rex
+rex build examples/hello.rex --no-native --c-out build/hello.c
+rex build src/main.rex --mode debug --cc clang
 ```
 
 ## 3. `run`
@@ -51,7 +59,7 @@ lua compiler/cli/rex.lua build src/main.rex --mode debug --cc clang
 Build then execute a Rex file.
 
 ```bash
-lua compiler/cli/rex.lua run [input] [options]
+rex run [input] [options]
 ```
 
 Default input:
@@ -66,7 +74,7 @@ Options:
 Example:
 
 ```bash
-lua compiler/cli/rex.lua run examples/hello.rex
+rex run examples/hello.rex
 ```
 
 ## 4. `bench`
@@ -74,7 +82,7 @@ lua compiler/cli/rex.lua run examples/hello.rex
 Run benchmark file multiple times and report elapsed stats.
 
 ```bash
-lua compiler/cli/rex.lua bench [input] [options]
+rex bench [input] [options]
 ```
 
 Default input:
@@ -88,7 +96,7 @@ Options:
 Example:
 
 ```bash
-lua compiler/cli/rex.lua bench examples/benchmark.rex --runs 10
+rex bench examples/benchmark.rex --runs 10
 ```
 
 ## 5. `test`
@@ -96,7 +104,7 @@ lua compiler/cli/rex.lua bench examples/benchmark.rex --runs 10
 Build all example files to C.
 
 ```bash
-lua compiler/cli/rex.lua test
+rex test
 ```
 
 This validates parsing/typechecking/codegen across the example set.
@@ -106,7 +114,7 @@ This validates parsing/typechecking/codegen across the example set.
 Format a source file (currently trims trailing spaces and normalizes ending newline).
 
 ```bash
-lua compiler/cli/rex.lua fmt [input]
+rex fmt [input]
 ```
 
 Default input:
@@ -117,7 +125,7 @@ Default input:
 Run parser + typechecker validation.
 
 ```bash
-lua compiler/cli/rex.lua lint [input]
+rex lint [input]
 ```
 
 Default input:
@@ -128,7 +136,7 @@ Default input:
 Same validation pipeline as lint, intended as quick correctness check.
 
 ```bash
-lua compiler/cli/rex.lua check [input]
+rex check [input]
 ```
 
 Default input:

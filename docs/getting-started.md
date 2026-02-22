@@ -8,11 +8,25 @@ Install:
 - Lua 5.4+ (or compatible runtime)
 - A C compiler (`cc`, `clang`, or `gcc`)
 
-Then open a terminal in the repository root.
+Then pick one of the flows below.
 
-## 2. Run an Existing Example
+## 2. Run Rex from Installer (Windows)
 
-From the project root:
+If you installed Rex from the Windows setup package, run:
+
+```powershell
+rex run "C:\rex-lang\rex\examples\hello.rex"
+```
+
+If `rex` is not recognized in PowerShell, open a new terminal window or use:
+
+```powershell
+& "C:\Program Files\RexLang\bin\rex.cmd" run "C:\rex-lang\rex\examples\hello.rex"
+```
+
+## 3. Run Rex from Source Repository
+
+From the repo root:
 
 ```bash
 cd rex
@@ -23,9 +37,15 @@ You should see output similar to:
 - `Hello from Rex`
 - elapsed time in milliseconds
 
-## 3. Check a File (Types + Ownership)
+## 4. Check a File (Types + Ownership)
 
 Before running a program, use `check`:
+
+```bash
+rex check "C:\rex-lang\rex\examples\hello.rex"
+```
+
+From source checkout:
 
 ```bash
 cd rex
@@ -34,45 +54,57 @@ lua compiler/cli/rex.lua check examples/hello.rex
 
 If everything is valid, the command prints `OK ...`.
 
-## 4. Create a New Project
+## 5. Create a New Project
 
 Initialize a project folder:
 
 ```bash
-cd rex
-lua compiler/cli/rex.lua init my-app
+rex init my-app
 ```
 
 This creates:
 - `my-app/rex.toml`
 - `my-app/src/main.rex`
 
-## 5. Build and Run Your Own File
-
-Build to C and native binary:
+From source checkout:
 
 ```bash
 cd rex
-lua compiler/cli/rex.lua build my-app/src/main.rex
+lua compiler/cli/rex.lua init my-app
+```
+
+## 6. Build and Run Your Own File
+
+Build to C and native binary (installed Rex):
+
+```bash
+rex build my-app/src/main.rex
 ```
 
 Run directly:
 
 ```bash
+rex run my-app/src/main.rex
+```
+
+From source checkout:
+
+```bash
 cd rex
+lua compiler/cli/rex.lua build my-app/src/main.rex
 lua compiler/cli/rex.lua run my-app/src/main.rex
 ```
 
-## 6. Useful Daily Commands
+## 7. Useful Daily Commands
 
 - Format source:
-  - `lua compiler/cli/rex.lua fmt path/to/file.rex`
+  - `rex fmt path/to/file.rex`
 - Lint (same validation pipeline used in check):
-  - `lua compiler/cli/rex.lua lint path/to/file.rex`
+  - `rex lint path/to/file.rex`
 - Build all examples to generated C:
-  - `lua compiler/cli/rex.lua test`
+  - `rex test`
 
-## 7. Where to Go Next
+## 8. Where to Go Next
 
 - Syntax: `docs/syntax.md`
 - Ownership: `docs/ownership.md`
