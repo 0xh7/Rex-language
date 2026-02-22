@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: |
           $luaVersion = "5.4.8"
-          $luaUrl = "https://www.lua.org/ftp/lua-$luaVersion_Win64_bin.zip"
+          $luaUrl = "https://sourceforge.net/projects/luabinaries/files/$luaVersion/Tools%20Executables/lua-$luaVersion" + "_Win64_bin.zip/download"
           $toolsDir = Join-Path $PWD "dist\tools"
           $luaZip = Join-Path $toolsDir "lua-$luaVersion-win64.zip"
           $luaDir = Join-Path $toolsDir "lua-win64"
@@ -95,11 +95,14 @@ jobs:
           Invoke-WebRequest -Uri $luaUrl -OutFile $luaZip -MaximumRedirection 5 -TimeoutSec 120
           Expand-Archive -LiteralPath $luaZip -DestinationPath $luaDir -Force
 
-          $luaExe = Join-Path $luaDir "lua.exe"
-          if (-not (Test-Path $luaExe)) {
-            Write-Error "lua.exe was not found after extraction."
+          $luaExeInfo = Get-ChildItem -LiteralPath $luaDir -Filter "lua*.exe" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "luac*" -and $_.Name -notlike "wlua*" } |
+            Select-Object -First 1
+          if (-not $luaExeInfo) {
+            Write-Error "Lua executable was not found after extraction."
             exit 1
           }
+          $luaExe = $luaExeInfo.FullName
 
           "LUA_EXE=$luaExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "LUA_DIR=$luaDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
