@@ -42,9 +42,7 @@ Name: "arabic"; MessagesFile: "compiler:Languages\Arabic.isl"
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
-; ChineseSimplified.isl is unofficial and may be missing on CI runners.
-; Uncomment this line only when the file exists in Inno Setup Languages folder.
-; Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
@@ -73,9 +71,9 @@ Name: "{autodesktop}\Rex Console"; Filename: "{app}\bin\rex.cmd"; Tasks: desktop
 const
   EnvSubKey = 'Environment';
   PathValueName = 'Path';
-  HWND_BROADCAST = $FFFF;
-  WM_SETTINGCHANGE = $001A;
-  SMTO_ABORTIFHUNG = $0002;
+  REX_HWND_BROADCAST = $FFFF;
+  REX_WM_SETTINGCHANGE = $001A;
+  REX_SMTO_ABORTIFHUNG = $0002;
 
 function SendMessageTimeout(
   hWnd: Integer;
@@ -256,7 +254,7 @@ begin
     else
       RootKey := HKCU;
     AddPathEntry(RootKey, BinPath);
-    SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'Environment', SMTO_ABORTIFHUNG, 5000, ResultCode);
+    SendMessageTimeout(REX_HWND_BROADCAST, REX_WM_SETTINGCHANGE, 0, 'Environment', REX_SMTO_ABORTIFHUNG, 5000, ResultCode);
   end;
 end;
 
@@ -271,5 +269,5 @@ begin
   BinPath := ExpandConstant('{app}\bin');
   RemovePathEntry(HKCU, BinPath);
   RemovePathEntry(HKLM, BinPath);
-  SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'Environment', SMTO_ABORTIFHUNG, 5000, ResultCode);
+  SendMessageTimeout(REX_HWND_BROADCAST, REX_WM_SETTINGCHANGE, 0, 'Environment', REX_SMTO_ABORTIFHUNG, 5000, ResultCode);
 end;
