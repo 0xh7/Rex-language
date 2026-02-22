@@ -42,7 +42,9 @@ Name: "arabic"; MessagesFile: "compiler:Languages\Arabic.isl"
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
-Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; ChineseSimplified.isl is unofficial and may be missing on CI runners.
+; Uncomment this line only when the file exists in Inno Setup Languages folder.
+; Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
