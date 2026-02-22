@@ -248,6 +248,7 @@ jobs:
           Copy-Item -LiteralPath "rex\runtime_c" -Destination (Join-Path $packageDir "rex\runtime_c") -Recurse -Force
           Copy-Item -LiteralPath "rex\examples" -Destination (Join-Path $packageDir "rex\examples") -Recurse -Force
           Copy-Item -LiteralPath "rex.png" -Destination (Join-Path $packageDir "rex.png") -Force
+          Copy-Item -LiteralPath "tools\install\windows\rex.ico" -Destination (Join-Path $packageDir "rex.ico") -Force
 
           if ($env:LUA_BUNDLED -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:LUA_EXE) -and (Test-Path $env:LUA_EXE)) {
             New-Item -ItemType Directory -Path (Join-Path $packageDir "lua") -Force | Out-Null

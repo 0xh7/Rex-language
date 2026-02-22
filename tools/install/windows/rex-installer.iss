@@ -22,6 +22,7 @@ DefaultDirName={autopf}\RexLang
 DefaultGroupName=Rex Language
 OutputDir={#RepoRoot}\dist\windows
 OutputBaseFilename=rex-{#MyAppVersion}-windows-setup
+SetupIconFile={#RepoRoot}\tools\install\windows\rex.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -32,7 +33,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
 SetupLogging=yes
-UninstallDisplayIcon={uninstallexe}
+UninstallDisplayIcon={app}\rex.ico
 UsePreviousLanguage=yes
 
 [Languages]
@@ -56,15 +57,16 @@ Source: "{#RepoRoot}\rex\compiler\*"; DestDir: "{app}\rex\compiler"; Flags: igno
 Source: "{#RepoRoot}\rex\runtime_c\*"; DestDir: "{app}\rex\runtime_c"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#RepoRoot}\rex\examples\*"; DestDir: "{app}\rex\examples"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#RepoRoot}\rex.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\tools\install\windows\rex.ico"; DestDir: "{app}"; Flags: ignoreversion
 #ifdef LuaExe
 Source: "{#LuaExe}"; DestDir: "{app}\lua"; DestName: "lua.exe"; Flags: ignoreversion
 Source: "{#LuaDir}lua*.dll"; DestDir: "{app}\lua"; Flags: ignoreversion skipifsourcedoesntexist
 #endif
 
 [Icons]
-Name: "{group}\Rex Console"; Filename: "{cmd}"; Parameters: "/K ""{app}\bin\rex.cmd --help"""; WorkingDir: "{app}\bin"; IconFilename: "{sys}\cmd.exe"
+Name: "{group}\Rex Console"; Filename: "{cmd}"; Parameters: "/K ""{app}\bin\rex.cmd --help"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\rex.ico"
 Name: "{group}\Uninstall Rex"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Rex Console"; Filename: "{cmd}"; Parameters: "/K ""{app}\bin\rex.cmd --help"""; WorkingDir: "{app}\bin"; IconFilename: "{sys}\cmd.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Rex Console"; Filename: "{cmd}"; Parameters: "/K ""{app}\bin\rex.cmd --help"""; WorkingDir: "{app}\bin"; IconFilename: "{app}\rex.ico"; Tasks: desktopicon
 
 [Code]
 const
