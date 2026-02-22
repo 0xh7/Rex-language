@@ -82,60 +82,100 @@ jobs:
         shell: pwsh
         run: |
           $luaVersion = "5.4.8"
-          $luaUrl = "https://downloads.sourceforge.net/project/luabinaries/$luaVersion/Tools%20Executables/lua-$luaVersion" + "_Win64_bin.zip"
+          $luaFile = "lua-$luaVersion" + "_Win64_bin.zip"
+          $luaUrls = @(
+            "https://downloads.sourceforge.net/project/luabinaries/$luaVersion/Tools%20Executables/$luaFile",
+            "https://master.dl.sourceforge.net/project/luabinaries/$luaVersion/Tools%20Executables/$luaFile",
+            "https://yer.dl.sourceforge.net/project/luabinaries/$luaVersion/Tools%20Executables/$luaFile?viasf=1"
+          )
           $toolsDir = Join-Path $PWD "dist\tools"
           $luaZip = Join-Path $toolsDir "lua-$luaVersion-win64.zip"
           $luaDir = Join-Path $toolsDir "lua-win64"
+          $luaBundled = "0"
 
           New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
           if (Test-Path $luaDir) {
             Remove-Item -LiteralPath $luaDir -Recurse -Force
           }
 
-          Invoke-WebRequest -Uri $luaUrl -OutFile $luaZip -MaximumRedirection 10 -TimeoutSec 180 -Headers @{ "User-Agent" = "Mozilla/5.0" }
-
-          if (-not (Test-Path $luaZip)) {
-            Write-Error "Lua zip was not downloaded."
-            exit 1
-          }
-
-          if ((Get-Item -LiteralPath $luaZip).Length -lt 1024) {
-            Write-Error "Lua zip is too small; likely a bad download."
-            exit 1
-          }
-
-          $sig = New-Object byte[] 4
-          $stream = [System.IO.File]::OpenRead($luaZip)
-          try {
-            [void]$stream.Read($sig, 0, 4)
-          } finally {
-            $stream.Dispose()
-          }
-
-          if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
-            Write-Error "Downloaded Lua file is not a ZIP archive."
-            exit 1
-          }
-
           Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($luaZip, $luaDir)
+          foreach ($luaUrl in $luaUrls) {
+            Write-Host "Trying Lua URL: $luaUrl"
 
-          $luaExeInfo = Get-ChildItem -LiteralPath $luaDir -Filter "lua*.exe" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike "luac*" -and $_.Name -notlike "wlua*" } |
-            Select-Object -First 1
-          if (-not $luaExeInfo) {
-            Write-Error "Lua executable was not found after extraction."
-            exit 1
+            if (Test-Path $luaZip) {
+              Remove-Item -LiteralPath $luaZip -Force
+            }
+            if (Test-Path $luaDir) {
+              Remove-Item -LiteralPath $luaDir -Recurse -Force
+            }
+
+            & curl.exe -L --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 180 `
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" `
+              -o $luaZip $luaUrl
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Download failed from URL."
+              continue
+            }
+
+            if (-not (Test-Path $luaZip)) {
+              Write-Warning "Lua zip missing after download."
+              continue
+            }
+
+            if ((Get-Item -LiteralPath $luaZip).Length -lt 1024) {
+              Write-Warning "Lua zip too small; likely invalid response."
+              continue
+            }
+
+            $sig = New-Object byte[] 4
+            $stream = [System.IO.File]::OpenRead($luaZip)
+            try {
+              [void]$stream.Read($sig, 0, 4)
+            } finally {
+              $stream.Dispose()
+            }
+
+            if (-not ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B)) {
+              Write-Warning "Downloaded file is not a ZIP archive."
+              continue
+            }
+
+            New-Item -ItemType Directory -Path $luaDir -Force | Out-Null
+            try {
+              [System.IO.Compression.ZipFile]::ExtractToDirectory($luaZip, $luaDir)
+            } catch {
+              Write-Warning "Failed to extract Lua zip."
+              continue
+            }
+
+            $luaExeInfo = Get-ChildItem -LiteralPath $luaDir -Filter "lua*.exe" -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -notlike "luac*" -and $_.Name -notlike "wlua*" } |
+              Select-Object -First 1
+            if (-not $luaExeInfo) {
+              Write-Warning "Lua executable not found after extraction."
+              continue
+            }
+
+            $luaExe = $luaExeInfo.FullName
+            "LUA_EXE=$luaExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "LUA_DIR=$luaDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            $luaBundled = "1"
+            break
           }
-          $luaExe = $luaExeInfo.FullName
 
-          "LUA_EXE=$luaExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "LUA_DIR=$luaDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LUA_BUNDLED=$luaBundled" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($luaBundled -ne "1") {
+            Write-Warning "Continuing without bundled Lua; installer/portable will require Lua in PATH."
+          }
 
       - name: Build Windows installer
         shell: pwsh
         run: |
-          & .\tools\install\windows\build-installer.bat "$env:LUA_EXE" "$env:RELEASE_VERSION"
+          if ($env:LUA_BUNDLED -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:LUA_EXE)) {
+            & .\tools\install\windows\build-installer.bat "$env:LUA_EXE" "$env:RELEASE_VERSION"
+          } else {
+            & .\tools\install\windows\build-installer.bat "" "$env:RELEASE_VERSION"
+          }
 
       - name: Build portable package
         shell: pwsh
@@ -151,19 +191,26 @@ jobs:
           }
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $packageDir "rex") -Force | Out-Null
-          New-Item -ItemType Directory -Path (Join-Path $packageDir "lua") -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $packageDir "bin") -Force | Out-Null
 
           Copy-Item -LiteralPath "rex\compiler" -Destination (Join-Path $packageDir "rex\compiler") -Recurse -Force
           Copy-Item -LiteralPath "rex\runtime_c" -Destination (Join-Path $packageDir "rex\runtime_c") -Recurse -Force
           Copy-Item -LiteralPath "rex\examples" -Destination (Join-Path $packageDir "rex\examples") -Recurse -Force
           Copy-Item -LiteralPath "rex.png" -Destination (Join-Path $packageDir "rex.png") -Force
-          Copy-Item -LiteralPath "$env:LUA_EXE" -Destination (Join-Path $packageDir "lua\lua.exe") -Force
 
-          Get-ChildItem -LiteralPath "$env:LUA_DIR" -Filter "lua*.dll" -File -ErrorAction SilentlyContinue |
-            ForEach-Object {
-              Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir "lua") -Force
+          if ($env:LUA_BUNDLED -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:LUA_EXE) -and (Test-Path $env:LUA_EXE)) {
+            New-Item -ItemType Directory -Path (Join-Path $packageDir "lua") -Force | Out-Null
+            Copy-Item -LiteralPath "$env:LUA_EXE" -Destination (Join-Path $packageDir "lua\lua.exe") -Force
+
+            if (-not [string]::IsNullOrWhiteSpace($env:LUA_DIR) -and (Test-Path $env:LUA_DIR)) {
+              Get-ChildItem -LiteralPath "$env:LUA_DIR" -Filter "lua*.dll" -File -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                  Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir "lua") -Force
+                }
             }
+          } else {
+            Write-Warning "Portable package built without bundled Lua; system Lua in PATH is required."
+          }
 
           $launcherLines = @(
             '@echo off',
