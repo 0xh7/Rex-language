@@ -171,10 +171,46 @@ jobs:
       - name: Build Windows installer
         shell: pwsh
         run: |
-          if ($env:LUA_BUNDLED -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:LUA_EXE)) {
-            & .\tools\install\windows\build-installer.bat "$env:LUA_EXE" "$env:RELEASE_VERSION"
-          } else {
-            & .\tools\install\windows\build-installer.bat "" "$env:RELEASE_VERSION"
+          $repoRoot = (Get-Location).Path
+          $scriptPath = Join-Path $repoRoot "tools\install\windows\rex-installer.iss"
+          $outDir = Join-Path $repoRoot "dist\windows"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+          $programFiles = [Environment]::GetEnvironmentVariable("ProgramFiles")
+          $localAppData = [Environment]::GetEnvironmentVariable("LocalAppData")
+          $isccCandidates = @()
+          if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+            $isccCandidates += (Join-Path $programFilesX86 "Inno Setup 6\ISCC.exe")
+          }
+          if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+            $isccCandidates += (Join-Path $programFiles "Inno Setup 6\ISCC.exe")
+          }
+          if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            $isccCandidates += (Join-Path $localAppData "Programs\Inno Setup 6\ISCC.exe")
+          }
+          $iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Error "ISCC.exe not found after Inno Setup installation."
+            exit 1
+          }
+
+          $args = @(
+            "/DRepoRoot=$repoRoot",
+            "/DMyAppVersion=$env:RELEASE_VERSION"
+          )
+          if ($env:LUA_BUNDLED -eq "1" -and -not [string]::IsNullOrWhiteSpace($env:LUA_EXE) -and (Test-Path $env:LUA_EXE)) {
+            $args += "/DLuaExe=$env:LUA_EXE"
+          }
+          $args += @(
+            "/O$outDir",
+            $scriptPath
+          )
+
+          & $iscc @args
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ISCC failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
           }
 
       - name: Build portable package
