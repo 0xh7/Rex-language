@@ -203,6 +203,8 @@ begin
     'setlocal' + #13#10 +
     'set "REX_ROOT=%~dp0.."' + #13#10 +
     'set "REX_CLI=%REX_ROOT%\rex\compiler\cli\rex.lua"' + #13#10 +
+    'set "LUA_PATH=%REX_ROOT%\rex\?.lua;%REX_ROOT%\rex\?\init.lua;;"' + #13#10 +
+    'set "LUA_CPATH=%REX_ROOT%\lua\?.dll;;"' + #13#10 +
     'set "REX_LUA=%REX_ROOT%\lua\lua.exe"' + #13#10 +
     'if not exist "%REX_CLI%" goto missing_cli' + #13#10 +
     'if exist "%REX_LUA%" goto run' + #13#10 +
