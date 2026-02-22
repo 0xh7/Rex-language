@@ -58,6 +58,21 @@ lua compiler/cli/rex.lua test
 - Examples index: `docs/examples-index.md`
 - Roadmap: `docs/roadmap.md`
 
+## Releases
+
+GitHub releases are automated through `.github/workflows/release.yml`.
+Each release publishes:
+
+- `rex-<version>-windows-setup.exe`
+- `rex-<version>-windows-portable.zip`
+
+Create a release:
+
+```bash
+git tag -a v0.2.0 -m "Rex v0.2.0"
+git push origin v0.2.0
+```
+
 ## Project Layout
 
 - `rex/compiler` - lexer, parser, typechecker, and C code generator

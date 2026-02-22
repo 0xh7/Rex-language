@@ -1,0 +1,183 @@
+name: Release Rex
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (example: v0.2.0)"
+        required: true
+        type: string
+      version:
+        description: "Version without v (optional; defaults to tag)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      REF_NAME: ${{ github.ref_name }}
+      INPUT_TAG: ${{ github.event.inputs.tag || '' }}
+      INPUT_VERSION: ${{ github.event.inputs.version || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        shell: pwsh
+        run: |
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $tag = "$env:INPUT_TAG"
+            $version = "$env:INPUT_VERSION"
+          } else {
+            $tag = "$env:REF_NAME"
+            $version = "$env:REF_NAME"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            Write-Error "Release tag is required."
+            exit 1
+          }
+
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = $tag
+          }
+
+          $tag = $tag.Trim()
+          $version = $version.Trim()
+
+          if ($tag.StartsWith("refs/tags/")) {
+            $tag = $tag.Substring(10)
+          }
+
+          if (-not $tag.StartsWith("v")) {
+            $tag = "v$tag"
+          }
+
+          if ($version.StartsWith("v")) {
+            $version = $version.Substring(1)
+          }
+
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            Write-Error "Resolved version is empty."
+            exit 1
+          }
+
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Download Lua runtime (Win64)
+        shell: pwsh
+        run: |
+          $luaVersion = "5.4.8"
+          $luaUrl = "https://www.lua.org/ftp/lua-$luaVersion_Win64_bin.zip"
+          $toolsDir = Join-Path $PWD "dist\tools"
+          $luaZip = Join-Path $toolsDir "lua-$luaVersion-win64.zip"
+          $luaDir = Join-Path $toolsDir "lua-win64"
+
+          New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+          if (Test-Path $luaDir) {
+            Remove-Item -LiteralPath $luaDir -Recurse -Force
+          }
+
+          Invoke-WebRequest -Uri $luaUrl -OutFile $luaZip -MaximumRedirection 5 -TimeoutSec 120
+          Expand-Archive -LiteralPath $luaZip -DestinationPath $luaDir -Force
+
+          $luaExe = Join-Path $luaDir "lua.exe"
+          if (-not (Test-Path $luaExe)) {
+            Write-Error "lua.exe was not found after extraction."
+            exit 1
+          }
+
+          "LUA_EXE=$luaExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LUA_DIR=$luaDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          & .\tools\install\windows\build-installer.bat "$env:LUA_EXE" "$env:RELEASE_VERSION"
+
+      - name: Build portable package
+        shell: pwsh
+        run: |
+          $releaseVersion = "$env:RELEASE_VERSION"
+          $portableRoot = Join-Path $PWD "dist\windows\portable"
+          $packageName = "rex-$releaseVersion-windows-portable"
+          $packageDir = Join-Path $portableRoot $packageName
+          $zipPath = Join-Path $PWD ("dist\windows\{0}.zip" -f $packageName)
+
+          if (Test-Path $portableRoot) {
+            Remove-Item -LiteralPath $portableRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageDir "rex") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageDir "lua") -Force | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageDir "bin") -Force | Out-Null
+
+          Copy-Item -LiteralPath "rex\compiler" -Destination (Join-Path $packageDir "rex\compiler") -Recurse -Force
+          Copy-Item -LiteralPath "rex\runtime_c" -Destination (Join-Path $packageDir "rex\runtime_c") -Recurse -Force
+          Copy-Item -LiteralPath "rex\examples" -Destination (Join-Path $packageDir "rex\examples") -Recurse -Force
+          Copy-Item -LiteralPath "rex.png" -Destination (Join-Path $packageDir "rex.png") -Force
+          Copy-Item -LiteralPath "$env:LUA_EXE" -Destination (Join-Path $packageDir "lua\lua.exe") -Force
+
+          Get-ChildItem -LiteralPath "$env:LUA_DIR" -Filter "lua*.dll" -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir "lua") -Force
+            }
+
+          $launcherLines = @(
+            '@echo off',
+            'setlocal',
+            'set "REX_ROOT=%~dp0.."',
+            'set "REX_LUA=%REX_ROOT%\lua\lua.exe"',
+            'if exist "%REX_LUA%" goto run',
+            'where lua.exe >nul 2>nul && set "REX_LUA=lua.exe"',
+            'if defined REX_LUA goto run',
+            'echo Rex error: lua.exe not found. Reinstall Rex with bundled Lua or add Lua to PATH.',
+            'exit /b 1',
+            ':run',
+            '"%REX_LUA%" "%REX_ROOT%\rex\compiler\cli\rex.lua" %*'
+          )
+          Set-Content -LiteralPath (Join-Path $packageDir "bin\rex.cmd") -Value ($launcherLines -join "`r`n") -Encoding ascii
+
+          if (Test-Path $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+          Compress-Archive -Path $packageDir -DestinationPath $zipPath -CompressionLevel Optimal
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          $setupPath = Join-Path $PWD ("dist\windows\rex-{0}-windows-setup.exe" -f $env:RELEASE_VERSION)
+          $portablePath = Join-Path $PWD ("dist\windows\rex-{0}-windows-portable.zip" -f $env:RELEASE_VERSION)
+
+          if (-not (Test-Path $setupPath)) {
+            Write-Error "Installer asset is missing: $setupPath"
+            exit 1
+          }
+          if (-not (Test-Path $portablePath)) {
+            Write-Error "Portable asset is missing: $portablePath"
+            exit 1
+          }
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Rex ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          files: |
+            dist/windows/rex-${{ env.RELEASE_VERSION }}-windows-setup.exe
+            dist/windows/rex-${{ env.RELEASE_VERSION }}-windows-portable.zip
