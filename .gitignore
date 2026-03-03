@@ -28,6 +28,7 @@ node_modules/
 # Logs
 *.log
 
+# Service directories
 services/
 website/
 dist/
