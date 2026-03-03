@@ -24,4 +24,9 @@ fn main() {
     // compound nested assign (Features 1 + 3)
     o.inner.value += 1
     println(fmt.format(o.inner.get()))  // 100
+
+    
+    mut items = [Inner.new(5)]
+    items[0].value += 5
+    println(fmt.format(items[0].value)) // 10
 }

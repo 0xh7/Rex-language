@@ -425,6 +425,15 @@ function Parser:parse_statement()
     return ast.node("Spawn", { block = block })
   end
 
+  if self:is_postfix_lvalue_assign_ahead() then
+    local target = self:parse_postfix_lvalue()
+    local assign_op = self:current().value
+    self:advance()
+    local rhs = self:parse_expression()
+    self:match(";")
+    return self:build_assignment_from_target(target, assign_op, rhs)
+  end
+
   if self:is_index_assign_ahead() then
     local name = self:expect_kind("ident").value
     self:expect("[")
@@ -541,6 +550,96 @@ function Parser:is_member_assign_ahead()
     if self:peek(i).value ~= "." then return false end
     i = i + 1
   end
+end
+
+function Parser:is_postfix_lvalue_assign_ahead()
+  if self:current().kind ~= "ident" then
+    return false
+  end
+  local i = 1
+  local saw_postfix = false
+  while true do
+    local tok = self:peek(i)
+    if tok.value == "[" then
+      saw_postfix = true
+      local depth = 1
+      i = i + 1
+      while depth > 0 do
+        local inner = self:peek(i)
+        if not inner or inner.kind == "eof" then
+          return false
+        end
+        if inner.value == "[" then
+          depth = depth + 1
+        elseif inner.value == "]" then
+          depth = depth - 1
+        end
+        i = i + 1
+      end
+    elseif tok.value == "." then
+      saw_postfix = true
+      i = i + 1
+      if self:peek(i).kind ~= "ident" then
+        return false
+      end
+      i = i + 1
+    else
+      break
+    end
+  end
+  if not saw_postfix then
+    return false
+  end
+  local op = self:peek(i).value
+  return op == "=" or COMPOUND_OPS[op] ~= nil
+end
+
+function Parser:parse_postfix_lvalue()
+  local target = ast.node("Identifier", { name = self:expect_kind("ident").value })
+  while true do
+    if self:match("[") then
+      local index = self:parse_expression()
+      self:expect("]")
+      target = ast.node("Index", { object = target, index = index })
+    elseif self:match(".") then
+      local prop = self:expect_kind("ident").value
+      target = ast.node("Member", { object = target, property = prop })
+    else
+      break
+    end
+  end
+  return target
+end
+
+function Parser:build_assignment_from_target(target, assign_op, rhs)
+  local value = rhs
+  if assign_op ~= "=" then
+    local bin_op = COMPOUND_OPS[assign_op]
+    if not bin_op then
+      self:error("Invalid assignment operator: " .. tostring(assign_op))
+    end
+    value = ast.node("Binary", {
+      op = bin_op,
+      left = target,
+      right = rhs,
+    })
+  end
+
+  if target.kind == "Index" then
+    return ast.node("IndexAssign", {
+      object = target.object,
+      index = target.index,
+      value = value,
+    })
+  elseif target.kind == "Member" then
+    return ast.node("MemberAssign", {
+      object = target.object,
+      property = target.property,
+      value = value,
+    })
+  end
+
+  self:error("Invalid assignment target")
 end
 
 
