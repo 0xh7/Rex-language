@@ -1,6 +1,7 @@
-# Rex Language Spec (Current Implementation)
+# Rex Language Spec (Current Implementation and v1 Baseline)
 
-This document describes the implementation that exists in this repository today.
+This document describes the implementation that exists in this repository today and
+the baseline Rex intends to carry into `1.0` unless changed explicitly before the freeze.
 It follows compiler and runtime behavior first, and only states rules we can point to in code.
 
 ## 1. Design Direction
@@ -161,4 +162,12 @@ Platform notes:
 ## 10. Stability Notes
 
 Rex is actively maintained and used across the examples in this repository.
-For upcoming goals and priorities, see `docs/roadmap.md`.
+For `1.0`, Rex is prioritizing a stable language/tooling contract over large syntax growth.
+
+Current stability baseline:
+- keep the language explicit, keyword-first, and inspectable
+- keep project/package workflows small and predictable
+- treat `rex.toml` `version` as the app/package version, separate from the Rex CLI release version
+- freeze documented package limitations deliberately instead of leaving them ambiguous
+
+For `1.0` gates and accepted limitations, see `docs/roadmap.md` and `docs/package-manager-v1.md`.

@@ -80,6 +80,14 @@ Meaning:
 Fix:
 - Move `_ => ...` to the last arm.
 
+### `Parse error ...: Multi-tag match arms do not support bindings yet`
+Meaning:
+- A `match` arm tried to mix `Tag(binding)` syntax with `A | B` style matching.
+
+Fix:
+- Use one bound tag arm such as `Some(x) => ...`
+- Or remove the binding from the multi-tag arm
+
 ## 2. Type and Name Errors
 
 ### `Unknown identifier: name`

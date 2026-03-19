@@ -1,3 +1,4 @@
+
 #ifndef REX_RT_H
 #define REX_RT_H
 
@@ -227,6 +228,13 @@ RexValue rex_net_udp_socket(void);
 RexValue rex_http_get(RexValue url);
 RexValue rex_http_get_status(RexValue url);
 RexValue rex_http_get_json(RexValue url);
+RexValue rex_process_run(RexValue command);
+RexValue rex_process_capture(RexValue command);
+RexValue rex_url_parse(RexValue url);
+RexValue rex_url_encode_component(RexValue text);
+RexValue rex_url_decode_component(RexValue text);
+RexValue rex_url_join(RexValue base, RexValue part);
+RexValue rex_url_with_query(RexValue base, RexValue params);
 
 RexValue rex_random_seed(RexValue seed);
 RexValue rex_random_int(RexValue min, RexValue max);

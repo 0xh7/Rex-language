@@ -149,7 +149,17 @@ Set:
 - `home()`
 - `temp_dir()`
 
-## 12. `rex::path`
+## 12. `rex::process`
+
+- `run(&command) -> Result<num>`
+- `capture(&command) -> Result<(num, str)>`
+
+Notes:
+- commands run through the host shell
+- `run` inherits the child process output stream
+- `capture` returns `(exit_code, stdout)`
+
+## 13. `rex::path`
 
 - `join(&a, &b)`
 - `basename(&path)`
@@ -158,18 +168,39 @@ Set:
 - `stem(&path)`
 - `is_abs(&path)`
 
-## 13. `rex::audio`
+## 14. `rex::url`
+
+- `parse(&url) -> Result<Map<str, str>>`
+- `encode_component(&text) -> str`
+- `decode_component(&text) -> Result<str>`
+- `join(&base, &part) -> str`
+- `with_query(&base, &params) -> str`
+
+Common parse keys:
+- `scheme`
+- `host`
+- `port`
+- `path`
+- `query`
+- `fragment`
+- `request_target`
+
+Current scope:
+- `url.parse` expects `scheme://host...`
+- `http` remains limited to `http://` and `https://`
+
+## 15. `rex::audio`
 
 - `play(&path)`, `play_loop(&path)`, `stop()`
 - `supports(&ext)`
 - `set_volume(v)`, `volume()`
 
-## 14. `rex::log`
+## 16. `rex::log`
 
 - `debug(x)`, `info(x)`, `warn(x)`, `error(x)`
 - `set_level(x)`, `level()`
 
-## 15. `rex::net` and `rex::http`
+## 17. `rex::net` and `rex::http`
 
 Networking:
 - `net.tcp_connect(&addr) -> Result<str>`
@@ -180,20 +211,20 @@ HTTP:
 - `http.get_status(&url) -> Result<Map<str, str>>`
 - `http.get_json<T>(&url) -> Result<T>`
 
-## 16. `rex::random`
+## 18. `rex::random`
 
 - `seed(n)`
 - `int(min, max)`, `float()`, `bool(probability)`
 - `choice(&vec)`, `shuffle(&mut vec)`
 - `range(min, max)`
 
-## 17. `rex::json`
+## 19. `rex::json`
 
 - `encode(value) -> Result<str>`
 - `encode_pretty(value, indent) -> Result<str>`
 - `decode<T>(&text) -> Result<T>`
 
-## 18. `rex::result`
+## 20. `rex::result`
 
 - `Ok(x)`
 - `Err(e)`
@@ -204,7 +235,7 @@ HTTP:
 - `ok_or(value, err) -> Result`
 - `expect(result, &message)`
 
-## 19. `rex::ui`
+## 21. `rex::ui`
 
 UI module exposes window/input/widget helpers, including:
 - lifecycle: `begin`, `end`, `redraw`, `clear`

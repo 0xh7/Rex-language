@@ -93,13 +93,23 @@ Generated files:
 - `my-app/src/main.rex`
 
 Generated manifest:
+- `version = "0.1.0"` for the new project's own package version
 - `entry = "src/main.rex"`
+
+Use `rex version` to inspect the Rex CLI release version.
 
 Source checkout usage:
 
 ```bash
 cd rex
 lua compiler/cli/rex.lua init my-app
+```
+
+Check the installed CLI release:
+
+```bash
+rex version
+rex check-update
 ```
 
 ## 7. Build and Run Your Own File

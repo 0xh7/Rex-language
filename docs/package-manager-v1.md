@@ -34,6 +34,9 @@ version = "0.1.0"
 entry = "src/main.rex"
 ```
 
+Here `version` is the project/package version for that Rex app or package.
+It is not the Rex CLI/language release version.
+
 Dependencies are stored under:
 
 ```toml
@@ -104,7 +107,7 @@ Current supported import model:
   - `lm::Status`
   - `lm::Count`
 
-Current limitations:
+Current limitations accepted for v1 unless explicitly revised before `1.0`:
 
 - only public exports from the dependency entry file are visible
 - dependency entry files currently support `use`, `fn`, `struct`, `enum`, `type`, and `impl`

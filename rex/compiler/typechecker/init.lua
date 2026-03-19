@@ -164,7 +164,63 @@ local function type_var_allows_add(ctx, t)
   return bounds_has(bounds, "add") or bounds_has(bounds, "num") or bounds_has(bounds, "str") or bounds_has(bounds, "string")
 end
 
-local function type_to_string(t)
+local type_to_string
+
+local function type_satisfies_bound(actual, bound)
+  if not actual or not bound then
+    return false
+  end
+  local base = unwrap_ref(actual)
+  if not base or base.kind == "unknown" or base.kind == "any" then
+    return true
+  end
+  if bound == "any" then
+    return true
+  elseif bound == "add" then
+    return base.kind == "num" or base.kind == "str"
+  elseif bound == "num" or bound == "bool" or bound == "str" or bound == "nil" or bound == "void" then
+    return base.kind == bound
+  elseif bound == "string" then
+    return base.kind == "str"
+  elseif bound == "Vec" or bound == "vec" then
+    return base.kind == "vec"
+  elseif bound == "Map" or bound == "map" then
+    return base.kind == "map"
+  elseif bound == "Set" or bound == "set" then
+    return base.kind == "set"
+  elseif bound == "Result" or bound == "result" then
+    return base.kind == "result"
+  elseif bound == "Sender" or bound == "sender" then
+    return base.kind == "sender"
+  elseif bound == "Receiver" or bound == "receiver" then
+    return base.kind == "receiver"
+  elseif bound == "ptr" then
+    return base.kind == "ptr"
+  end
+  if base.kind == "struct" or base.kind == "enum" then
+    return base.name == bound or type_to_string(base) == bound
+  end
+  return type_to_string(base) == bound
+end
+
+local function validate_generic_bounds(ctx, generics, param_map, generic_bounds)
+  if not generics or #generics == 0 then
+    return
+  end
+  for _, name in ipairs(generics) do
+    local actual = param_map[name]
+    local bounds = generic_bounds and generic_bounds[name]
+    if actual and bounds then
+      for _, bound in ipairs(bounds) do
+        if not type_satisfies_bound(actual, bound) then
+          report(ctx, "Type argument " .. name .. " must satisfy bound " .. bound .. ", got " .. type_to_string(actual))
+        end
+      end
+    end
+  end
+end
+
+type_to_string = function(t)
   if not t then
     return "unknown"
   end
@@ -924,6 +980,10 @@ local modules = {
     home = sig({}, type_any()),
     temp_dir = sig({}, type_str()),
   },
+  process = {
+    run = sig({ type_ref(type_str(), false) }, type_result(type_num(), type_str())),
+    capture = sig({ type_ref(type_str(), false) }, type_result(type_tuple({ type_num(), type_str() }), type_str())),
+  },
   path = {
     join = sig({ type_ref(type_str(), false), type_ref(type_str(), false) }, type_str()),
     basename = sig({ type_ref(type_str(), false) }, type_str()),
@@ -931,6 +991,13 @@ local modules = {
     ext = sig({ type_ref(type_str(), false) }, type_str()),
     stem = sig({ type_ref(type_str(), false) }, type_str()),
     is_abs = sig({ type_ref(type_str(), false) }, type_bool()),
+  },
+  url = {
+    parse = sig({ type_ref(type_str(), false) }, type_result(type_map(type_str(), type_str()), type_str())),
+    encode_component = sig({ type_ref(type_str(), false) }, type_str()),
+    decode_component = sig({ type_ref(type_str(), false) }, type_result(type_str(), type_str())),
+    join = sig({ type_ref(type_str(), false), type_ref(type_str(), false) }, type_str()),
+    with_query = sig({ type_ref(type_str(), false), type_ref(type_map(type_str(), type_str()), false) }, type_str()),
   },
   audio = {
     play = sig({ type_ref(type_str(), false) }, type_bool()),
@@ -1688,6 +1755,7 @@ local function apply_signature(ctx, sig, args, type_args)
         param_map[name] = param_map[name] or type_unknown()
       end
     end
+    validate_generic_bounds(ctx, generics, param_map, sig.generic_bounds)
   end
   local resolved = resolve_type(ctx, sig.ret, param_map)
   ctx.generic_bounds = prev_bounds
@@ -2192,6 +2260,7 @@ infer_call = function(ctx, expr)
               param_map[name] = param_map[name] or type_unknown()
             end
           end
+          validate_generic_bounds(ctx, generics, param_map, sig.generic_bounds)
         end
         local resolved = resolve_type(ctx, sig.ret, param_map)
         ctx.generic_bounds = prev_bounds

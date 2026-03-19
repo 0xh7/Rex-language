@@ -169,6 +169,7 @@ match value {
 
 `match` arms can use block bodies or expression-style bodies.
 Bindings are supported on a single concrete tag arm such as `Some(x) => ...`.
+Multi-tag arms such as `A | B => ...` are supported, but not `A(x) | B => ...`.
 
 ## 7. Advanced Statements
 

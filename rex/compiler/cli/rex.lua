@@ -7,6 +7,11 @@ local Parser = require("compiler.parser")
 local Codegen = require("compiler.codegen")
 local Typechecker = require("compiler.typechecker")
 
+local REX_VERSION = "0.5.1"
+local DEFAULT_PROJECT_VERSION = "0.1.0"
+local UPDATE_API_URL = "https://api.github.com/repos/0xh7/rex-lang/releases/latest"
+local UPDATE_RELEASES_URL = "https://github.com/0xh7/rex-lang/releases"
+
 local function read_file(path)
   local f, err = io.open(path, "rb")
   if not f then
@@ -161,6 +166,31 @@ local function current_dir()
   local line = p:read("*l") or "."
   p:close()
   return clean_path(line)
+end
+
+local function capture_command(cmd)
+  local p = io.popen(cmd)
+  if not p then
+    return nil
+  end
+  local data = p:read("*a") or ""
+  local ok, why, code = p:close()
+  if type(ok) == "number" then
+    if ok == 0 then
+      return data
+    end
+    return nil
+  end
+  if type(ok) == "boolean" then
+    if ok then
+      return data
+    end
+    if why == "exit" and type(code) == "number" and code == 0 then
+      return data
+    end
+    return nil
+  end
+  return nil
 end
 
 local function is_absolute_path(path)
@@ -579,7 +609,7 @@ local function serialize_lock(project_root, manifest, deps)
     '',
     '[root]',
     string.format('name = "%s"', tostring(manifest.name or "app")),
-    string.format('version = "%s"', tostring(manifest.version or "0.1.0")),
+    string.format('version = "%s"', tostring(manifest.version or DEFAULT_PROJECT_VERSION)),
     string.format('entry = "%s"', tostring(manifest.entry or "src/main.rex")),
   }
 
@@ -588,7 +618,7 @@ local function serialize_lock(project_root, manifest, deps)
     table.insert(lines, "")
     table.insert(lines, string.format('[package.%s]', dep.name))
     table.insert(lines, string.format('name = "%s"', tostring(dep_manifest.name or dep.name)))
-    table.insert(lines, string.format('version = "%s"', tostring(dep_manifest.version or "0.1.0")))
+    table.insert(lines, string.format('version = "%s"', tostring(dep_manifest.version or DEFAULT_PROJECT_VERSION)))
     table.insert(lines, string.format('entry = "%s"', tostring(dep_manifest.entry or "src/main.rex")))
     table.insert(lines, string.format('source = "%s"', tostring(dep.source_kind or "path")))
     if dep.source_kind == "git" then
@@ -632,7 +662,7 @@ local function cmd_deps()
     else
       source_label = tostring(dep.requested_path or relative_path(dep.root, root))
     end
-    print(string.format("- %s %s -> %s", dep.name, tostring(dep_manifest.version or "0.1.0"), source_label))
+    print(string.format("- %s %s -> %s", dep.name, tostring(dep_manifest.version or DEFAULT_PROJECT_VERSION), source_label))
   end
 end
 
@@ -1077,6 +1107,55 @@ local function detect_platform()
   return "linux"
 end
 
+local function parse_semver(text)
+  local major, minor, patch = tostring(text or ""):match("^v?(%d+)%.(%d+)%.(%d+)$")
+  if not major then
+    return nil
+  end
+  return {
+    major = tonumber(major),
+    minor = tonumber(minor),
+    patch = tonumber(patch),
+  }
+end
+
+local function compare_semver(a, b)
+  if a.major ~= b.major then
+    return a.major < b.major and -1 or 1
+  end
+  if a.minor ~= b.minor then
+    return a.minor < b.minor and -1 or 1
+  end
+  if a.patch ~= b.patch then
+    return a.patch < b.patch and -1 or 1
+  end
+  return 0
+end
+
+local function extract_json_string_field(text, field)
+  return tostring(text or ""):match('"' .. field .. '"%s*:%s*"([^"\\]+)')
+end
+
+local function fetch_latest_release_json()
+  if is_windows() then
+    local ps_cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';(Invoke-WebRequest -UseBasicParsing -Headers @{Accept='application/vnd.github+json';'User-Agent'='rex-cli/" .. REX_VERSION .. "'} -Uri '" .. UPDATE_API_URL .. "').Content\""
+    local out = capture_command(ps_cmd)
+    if out and out ~= "" then
+      return out
+    end
+    local curl_cmd = 'curl.exe -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: rex-cli/' .. REX_VERSION .. '" "' .. UPDATE_API_URL .. '" 2>nul'
+    return capture_command(curl_cmd)
+  end
+
+  local curl_cmd = 'curl -fsSL -H "Accept: application/vnd.github+json" -H "User-Agent: rex-cli/' .. REX_VERSION .. '" "' .. UPDATE_API_URL .. '" 2>/dev/null'
+  local out = capture_command(curl_cmd)
+  if out and out ~= "" then
+    return out
+  end
+  local wget_cmd = 'wget -qO- --header="Accept: application/vnd.github+json" --header="User-Agent: rex-cli/' .. REX_VERSION .. '" "' .. UPDATE_API_URL .. '" 2>/dev/null'
+  return capture_command(wget_cmd)
+end
+
 local function list_example_files()
   local sep = package.config:sub(1, 1)
   local cmd = sep == "\\"
@@ -1482,8 +1561,11 @@ local function init_project(path)
   mkdir_p(path)
   mkdir_p(path .. "/src")
   local manifest = table.concat({
+    "# Project/package version for this app.",
+    "# This is separate from the Rex CLI/language release version.",
+    "",
     "name = \"app\"",
-    "version = \"0.1.0\"",
+    "version = \"" .. DEFAULT_PROJECT_VERSION .. "\"",
     "entry = \"src/main.rex\"",
     "",
   }, "\n")
@@ -1503,6 +1585,52 @@ local function init_project(path)
   write_file(path .. "/src/main.rex", main)
 end
 
+local function print_version()
+  print("Rex CLI " .. REX_VERSION)
+end
+
+local function cmd_check_update()
+  local current_tag = "v" .. REX_VERSION
+  local latest_json = fetch_latest_release_json()
+
+  print("Current: " .. current_tag)
+  if not latest_json or latest_json == "" then
+    print("Latest : unknown")
+    print("Update check failed: unable to fetch GitHub release metadata.")
+    print("Releases: " .. UPDATE_RELEASES_URL)
+    return
+  end
+
+  local latest_tag = extract_json_string_field(latest_json, "tag_name")
+  if not latest_tag or latest_tag == "" then
+    print("Latest : unknown")
+    print("Update check failed: latest release tag was not found in the response.")
+    print("Releases: " .. UPDATE_RELEASES_URL)
+    return
+  end
+
+  print("Latest : " .. latest_tag)
+
+  local current = parse_semver(REX_VERSION)
+  local latest = parse_semver(latest_tag)
+  if not current or not latest then
+    print("Update check finished, but version comparison could not be completed.")
+    print("Releases: " .. UPDATE_RELEASES_URL)
+    return
+  end
+
+  local cmp = compare_semver(current, latest)
+  if cmp < 0 then
+    print("Update available.")
+    print("Release : " .. UPDATE_RELEASES_URL .. "/tag/" .. latest_tag)
+  elseif cmp == 0 then
+    print("Rex CLI is up to date.")
+  else
+    print("Local CLI version is ahead of the latest published release.")
+    print("Releases: " .. UPDATE_RELEASES_URL)
+  end
+end
+
 local function usage()
   print("Rex CLI")
   print("  rex init <dir>")
@@ -1518,6 +1646,8 @@ local function usage()
   print("  rex fmt [input]")
   print("  rex lint [input]")
   print("  rex check [input]")
+  print("  rex version")
+  print("  rex check-update")
   print("  note: native build/run need a C compiler (clang, gcc, or zig cc)")
   print("  env: REX_BUILD_DIR=<writable path> (optional)")
 end
@@ -1774,6 +1904,10 @@ elseif cmd == "check" then
     external_modules = prepared.external_modules,
   })
   print("OK " .. input)
+elseif cmd == "version" or cmd == "--version" or cmd == "-v" then
+  print_version()
+elseif cmd == "check-update" then
+  cmd_check_update()
 else
   usage()
 end

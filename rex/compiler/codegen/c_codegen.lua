@@ -235,6 +235,10 @@ function Codegen.generate(ast, opts)
         home = "rex_os_home",
         temp_dir = "rex_os_temp_dir",
       },
+      process = {
+        run = "rex_process_run",
+        capture = "rex_process_capture",
+      },
       path = {
         join = "rex_path_join",
         basename = "rex_path_basename",
@@ -242,6 +246,13 @@ function Codegen.generate(ast, opts)
         ext = "rex_path_ext",
         stem = "rex_path_stem",
         is_abs = "rex_path_is_abs",
+      },
+      url = {
+        parse = "rex_url_parse",
+        encode_component = "rex_url_encode_component",
+        decode_component = "rex_url_decode_component",
+        join = "rex_url_join",
+        with_query = "rex_url_with_query",
       },
       audio = {
         play = "rex_audio_play",
@@ -412,6 +423,25 @@ function Codegen.generate(ast, opts)
       return binding.c_name
     end
     return rex_name  
+  end
+
+  local function binding_named_type(value_type, prefix)
+    if type(value_type) ~= "string" then
+      return nil
+    end
+    local marker = prefix .. ":"
+    if value_type:sub(1, #marker) ~= marker or #value_type <= #marker then
+      return nil
+    end
+    return value_type:sub(#marker + 1)
+  end
+
+  local function binding_struct_name(value_type)
+    return binding_named_type(value_type, "struct")
+  end
+
+  local function binding_enum_name(value_type)
+    return binding_named_type(value_type, "enum")
   end
 
   local numeric_types = {
@@ -761,10 +791,7 @@ function Codegen.generate(ast, opts)
   local function infer_member_struct_name(expr)
     if expr.kind == "Identifier" then
       local vtype = scope_get(ctx, expr.name)
-      if vtype and type(vtype) == "string" and vtype:match("^struct:") then
-        return vtype:sub(8)
-      end
-      return nil
+      return binding_struct_name(vtype)
     elseif expr.kind == "Member" then
       local parent_struct = infer_member_struct_name(expr.object)
       if not parent_struct then return nil end
@@ -925,8 +952,8 @@ function Codegen.generate(ast, opts)
           elseif prop == "recv" then
             return "rex_receiver_recv(" .. emit_expr_raw(obj) .. ")"
           end
-          if vtype and vtype:match("^struct:") then
-            local struct_name = vtype:sub(8)
+          local struct_name = binding_struct_name(vtype)
+          if struct_name then
             local method_map = ctx.method_map[struct_name] or {}
             local method = method_map[prop]
             if method then
@@ -937,8 +964,8 @@ function Codegen.generate(ast, opts)
               return method .. "(" .. table.concat(call_args, ", ") .. ")"
             end
           end
-          if vtype and vtype:match("^enum:") then
-            local enum_name = vtype:sub(6)
+          local enum_name = binding_enum_name(vtype)
+          if enum_name then
             local method_map = ctx.method_map[enum_name] or {}
             local method = method_map[prop]
             if method then
@@ -1196,8 +1223,8 @@ function Codegen.generate(ast, opts)
           elseif prop == "recv" then
             return "rex_receiver_recv(" .. obj_expr .. ")"
           end
-          if vtype and vtype:match("^struct:") then
-            local struct_name = vtype:sub(8)
+          local struct_name = binding_struct_name(vtype)
+          if struct_name then
             local method_map = ctx.method_map[struct_name] or {}
             local method = method_map[prop]
             if method then
@@ -1208,8 +1235,8 @@ function Codegen.generate(ast, opts)
               return method .. "(" .. table.concat(call_args, ", ") .. ")"
             end
           end
-          if vtype and vtype:match("^enum:") then
-            local enum_name = vtype:sub(6)
+          local enum_name = binding_enum_name(vtype)
+          if enum_name then
             local method_map = ctx.method_map[enum_name] or {}
             local method = method_map[prop]
             if method then
@@ -1839,6 +1866,9 @@ function Codegen.generate(ast, opts)
         first_arm = false
 
         ctx.indent = ctx.indent + 1
+        table.insert(ctx.scopes, {})
+        table.insert(ctx.defer_stack, {})
+        table.insert(ctx.current_bindings, {})
         if arm.binding then
           local c_name = get_c_name(ctx, arm.binding)
           indent_line(ctx, "RexValue " .. c_name .. " = rex_tag_value(" .. tmp .. ");")
@@ -1878,11 +1908,22 @@ function Codegen.generate(ast, opts)
               end
             end
           else
-            emit_block(arm.body, true)
+            emit_block(arm.body, false)
           end
         else
-          emit_block(arm.body, true)
+          emit_block(arm.body, false)
         end
+        local active_id = ctx.active_bond_stack[#ctx.active_bond_stack]
+        if active_id then
+          local active_bond = ctx.bonds[active_id]
+          if active_bond and active_bond.scope_depth == #ctx.current_bindings then
+            error("Bond '" .. (active_bond.name or tostring(active_id)) .. "' left scope without commit/rollback")
+          end
+        end
+        emit_defer_list(ctx.defer_stack[#ctx.defer_stack])
+        table.remove(ctx.defer_stack)
+        table.remove(ctx.scopes)
+        table.remove(ctx.current_bindings)
         ctx.indent = ctx.indent - 1
         indent_line(ctx, "}")
       end

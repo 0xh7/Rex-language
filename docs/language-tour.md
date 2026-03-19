@@ -56,6 +56,7 @@ fn show(v: State) {
 ```
 
 `match` supports single-tag bindings, multi-tag arms, and wildcard fallback arms.
+Multi-tag bindings such as `Some(x) | None => ...` are rejected with a parse error.
 
 ## 4. Result and `?`
 

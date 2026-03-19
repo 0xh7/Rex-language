@@ -609,20 +609,40 @@ function Parser:parse_match()
     if #arms > 0 and arms[#arms].wildcard then
       self:error("Wildcard '_' must be the last arm in a match expression")
     end
-   
-    local tags = { self:expect_kind("ident").value }
-    while self:match("|") do
-      table.insert(tags, self:expect_kind("ident").value)
+
+    local function parse_match_arm_tag()
+      local tag = self:expect_kind("ident").value
+      if tag == "_" and self:current().value == "(" then
+        self:error("Wildcard '_' cannot have a binding in a match arm")
+      end
+      local tag_binding = nil
+      if tag ~= "_" and self:match("(") then
+        tag_binding = self:expect_kind("ident").value
+        self:expect(")")
+      end
+      return tag, tag_binding
     end
 
- 
+    local first_tag, first_binding = parse_match_arm_tag()
+    local tags = { first_tag }
+    local binding = first_binding
+    local saw_binding = first_binding ~= nil
+    local saw_wildcard = first_tag == "_"
+    while self:match("|") do
+      local tag, tag_binding = parse_match_arm_tag()
+      table.insert(tags, tag)
+      saw_binding = saw_binding or (tag_binding ~= nil)
+      saw_wildcard = saw_wildcard or (tag == "_")
+    end
+
+    if #tags > 1 and saw_wildcard then
+      self:error("Wildcard '_' cannot be combined with other match tags")
+    end
+
     local wildcard = (#tags == 1 and tags[1] == "_")
 
-  
-    local binding = nil
-    if not wildcard and #tags == 1 and self:match("(") then
-      binding = self:expect_kind("ident").value
-      self:expect(")")
+    if #tags > 1 and saw_binding then
+      self:error("Multi-tag match arms do not support bindings yet")
     end
 
     self:expect("=>")

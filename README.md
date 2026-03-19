@@ -201,6 +201,9 @@ version = "0.1.0"
 entry = "src/main.rex"
 ```
 
+Here `version` is the project/package version for `my-app`.
+It is separate from the Rex CLI/language release version reported by `rex version`.
+
 ## Documentation Map
 
 - `docs/getting-started.md` - shortest path from checkout to running code
@@ -226,8 +229,9 @@ entry = "src/main.rex"
 
 ## Current Focus
 
-The current branch of Rex is focused on three things:
+The current branch of Rex is focused on four things:
 
+- freezing a clear `v1.0` stability contract before large syntax additions
 - keeping the core language explicit and inspectable
 - making the standard library practical for daily work
 - stabilizing project and package management before taking on package hosting
@@ -235,6 +239,9 @@ The current branch of Rex is focused on three things:
 ## Releases
 
 GitHub releases are built through `.github/workflows/release.yml`.
+Use `rex version` to inspect the CLI release line.
+Use `rex check-update` to compare the installed CLI version against the latest published release.
+Project manifests keep their own package version in `rex.toml`.
 
 Published Windows artifacts:
 

@@ -17,6 +17,9 @@ lua compiler/cli/rex.lua <command> ...
 ```
 
 Examples use the installed form (`rex ...`).
+Use `rex version` or `rex --version` to inspect the CLI release version.
+Use `rex check-update` to compare the installed CLI version against the latest published release.
+The `version` field written to `rex.toml` is the project/package version, not the Rex release number.
 
 ## 1. `init`
 
@@ -31,6 +34,7 @@ Creates:
 - `<dir>/src/main.rex`
 
 The generated manifest includes:
+- `version = "0.1.0"` as the new project's package version
 - `entry = "src/main.rex"`
 
 ## 2. `build`
@@ -199,6 +203,7 @@ rex test
 This validates parsing/typechecking/codegen across the full example set,
 including regression samples for newer syntax such as struct literals,
 compound assignment, and richer `match` arms.
+It is a regression sweep for the shipped examples, not a full language conformance suite yet.
 
 ## 10. `fmt`
 
@@ -245,7 +250,30 @@ Example:
 rex check examples/test_multi_match.rex
 ```
 
-## 13. Build Modes
+## 13. `version`
+
+Print the Rex CLI release version.
+
+```bash
+rex version
+rex --version
+```
+
+## 14. `check-update`
+
+Compare the installed Rex CLI version against the latest published GitHub release.
+
+```bash
+rex check-update
+```
+
+Current behavior:
+- checks the latest published release tag from GitHub
+- compares it to the installed CLI version
+- prints the release link when an update is available
+- does not download or install updates automatically
+
+## 15. Build Modes
 
 - `release`: optimized build (default)
 - `debug`: debug-friendly build flags
@@ -254,14 +282,14 @@ You can also set mode through environment:
 - `REX_BUILD_MODE`
 - `REX_MODE`
 
-## 14. Environment Variables
+## 16. Environment Variables
 
 - `CC`: default C compiler
 - `REX_BUILD_MODE` / `REX_MODE`: default build mode
 - `REX_CFLAGS`: extra C compiler flags
 - `REX_OPT_FLAG`: override optimization behavior
 
-## 15. Include Preprocessing
+## 17. Include Preprocessing
 
 Before lexing/parsing, Rex can expand includes using comments:
 

@@ -36,11 +36,13 @@ This index maps the sample programs under `rex/examples` to the language or runt
 
 - `rex/examples/io.rex`: File and line I/O operations.
 - `rex/examples/os_fs.rex`: OS info + filesystem checks and directory creation.
+- `rex/examples/process.rex`: Host shell execution with exit codes and captured stdout.
 - `rex/examples/collections.rex`: Vector/map/set operations.
 - `rex/examples/collections_extra.rex`: Search, join, values, and items helpers for collections.
 - `rex/examples/json.rex`: JSON encode/decode with typed and dynamic values.
 - `rex/examples/text.rex`: Text/fmt helpers for trimming, search, joining, padding, and casing.
 - `rex/examples/time.rex`: Time APIs and elapsed calculations.
+- `rex/examples/url.rex`: URL parsing, component encoding, query building, and joining.
 - `rex/examples/threads.rex`: Channels and message passing.
 - `rex/examples/spawn.rex`: Basic spawn workers and wait.
 - `rex/examples/memory.rex`: Pointer allocation, dereference, `box`, `drop`.

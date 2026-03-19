@@ -21,6 +21,7 @@ typedef struct _stat rex_stat_t;
 #include <dirent.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -3911,9 +3912,13 @@ RexValue rex_net_udp_socket(void) {
 }
 
 typedef struct RexUrlParts {
+  char* scheme;
   char* host;
   char* port;
   char* path;
+  char* query;
+  char* fragment;
+  char* request_target;
   int use_tls;
 } RexUrlParts;
 
@@ -3926,77 +3931,167 @@ static void rex_url_free(RexUrlParts* parts) {
   if (!parts) {
     return;
   }
+  free(parts->scheme);
   free(parts->host);
   free(parts->port);
   free(parts->path);
+  free(parts->query);
+  free(parts->fragment);
+  free(parts->request_target);
+  parts->scheme = NULL;
   parts->host = NULL;
   parts->port = NULL;
   parts->path = NULL;
+  parts->query = NULL;
+  parts->fragment = NULL;
+  parts->request_target = NULL;
 }
 
-static int rex_http_parse_url(const char* url, RexUrlParts* out, const char** err) {
-  const char* s = url;
-  const char* http = "http://";
-  const char* https = "https://";
-  size_t http_len = strlen(http);
-  size_t https_len = strlen(https);
-  if (strncmp(s, https, https_len) == 0) {
-    out->use_tls = 1;
-    s += https_len;
-  } else if (strncmp(s, http, http_len) == 0) {
-    out->use_tls = 0;
-    s += http_len;
+static char* rex_dup_range(const char* start, const char* end) {
+  if (!start || !end || end < start) {
+    return rex_strdup("");
+  }
+  size_t len = (size_t)(end - start);
+  char* out = (char*)rex_xmalloc(len + 1);
+  memcpy(out, start, len);
+  out[len] = '\0';
+  return out;
+}
+
+static int rex_is_url_scheme_char(char ch) {
+  return isalnum((unsigned char)ch) || ch == '+' || ch == '-' || ch == '.';
+}
+
+static void rex_url_set_default_port(RexUrlParts* out) {
+  if (out->port) {
+    return;
+  }
+  if (out->scheme && strcmp(out->scheme, "https") == 0) {
+    out->port = rex_strdup("443");
+  } else if (out->scheme && strcmp(out->scheme, "http") == 0) {
+    out->port = rex_strdup("80");
   } else {
+    out->port = rex_strdup("");
+  }
+}
+
+static void rex_url_build_request_target(RexUrlParts* out) {
+  RexStrBuilder sb;
+  sb_init(&sb);
+  sb_append_str(&sb, out->path && out->path[0] ? out->path : "/");
+  if (out->query && out->query[0]) {
+    sb_append_char(&sb, '?');
+    sb_append_str(&sb, out->query);
+  }
+  out->request_target = rex_strdup(sb.data ? sb.data : "/");
+  sb_free(&sb);
+}
+
+static int rex_url_parse_parts(const char* url, RexUrlParts* out, const char** err) {
+  const char* input = url ? url : "";
+  const char* scheme_sep = strstr(input, "://");
+  memset(out, 0, sizeof(*out));
+  if (!scheme_sep || scheme_sep == input) {
     if (err) {
-      *err = "only http:// or https:// supported";
+      *err = "URL must include scheme://";
     }
     return 0;
   }
-  if (*s == '\0') {
+  for (const char* p = input; p < scheme_sep; ++p) {
+    if (!rex_is_url_scheme_char(*p)) {
+      if (err) {
+        *err = "invalid URL scheme";
+      }
+      return 0;
+    }
+  }
+  out->scheme = rex_dup_range(input, scheme_sep);
+  out->use_tls = (strcmp(out->scheme, "https") == 0);
+
+  const char* authority = scheme_sep + 3;
+  if (*authority == '\0') {
     if (err) {
       *err = "missing host";
     }
+    rex_url_free(out);
     return 0;
   }
-  const char* path = strchr(s, '/');
-  const char* host_end = path ? path : (s + strlen(s));
+
+  const char* authority_end = authority + strcspn(authority, "/?#");
   const char* colon = NULL;
-  for (const char* p = s; p < host_end; p++) {
+  for (const char* p = authority; p < authority_end; ++p) {
     if (*p == ':') {
       colon = p;
       break;
     }
   }
-  const char* host_end_actual = colon ? colon : host_end;
-  size_t host_len = (size_t)(host_end_actual - s);
-  if (host_len == 0) {
+
+  const char* host_end = colon ? colon : authority_end;
+  if (host_end == authority) {
     if (err) {
       *err = "missing host";
     }
+    rex_url_free(out);
     return 0;
   }
-  out->host = (char*)rex_xmalloc(host_len + 1);
-  memcpy(out->host, s, host_len);
-  out->host[host_len] = '\0';
+  out->host = rex_dup_range(authority, host_end);
+
   if (colon) {
-    size_t port_len = (size_t)(host_end - colon - 1);
-    if (port_len == 0) {
+    if ((colon + 1) == authority_end) {
       if (err) {
         *err = "bad port";
       }
+      rex_url_free(out);
       return 0;
     }
-    out->port = (char*)rex_xmalloc(port_len + 1);
-    memcpy(out->port, colon + 1, port_len);
-    out->port[port_len] = '\0';
+    out->port = rex_dup_range(colon + 1, authority_end);
   } else {
-    out->port = rex_strdup(out->use_tls ? "443" : "80");
+    rex_url_set_default_port(out);
   }
-  if (path) {
-    out->path = rex_strdup(path);
+
+  const char* cursor = authority_end;
+  if (*cursor == '/') {
+    const char* path_end = cursor + strcspn(cursor, "?#");
+    out->path = rex_dup_range(cursor, path_end);
+    cursor = path_end;
   } else {
     out->path = rex_strdup("/");
   }
+
+  if (*cursor == '?') {
+    const char* query_start = cursor + 1;
+    const char* query_end = query_start + strcspn(query_start, "#");
+    out->query = rex_dup_range(query_start, query_end);
+    cursor = query_end;
+  } else {
+    out->query = rex_strdup("");
+  }
+
+  if (*cursor == '#') {
+    out->fragment = rex_strdup(cursor + 1);
+  } else {
+    out->fragment = rex_strdup("");
+  }
+
+  if (!out->port) {
+    rex_url_set_default_port(out);
+  }
+  rex_url_build_request_target(out);
+  return 1;
+}
+
+static int rex_http_parse_url(const char* url, RexUrlParts* out, const char** err) {
+  if (!rex_url_parse_parts(url, out, err)) {
+    return 0;
+  }
+  if (strcmp(out->scheme ? out->scheme : "", "http") != 0 && strcmp(out->scheme ? out->scheme : "", "https") != 0) {
+    if (err) {
+      *err = "only http:// or https:// supported";
+    }
+    rex_url_free(out);
+    return 0;
+  }
+  out->use_tls = (strcmp(out->scheme, "https") == 0);
   return 1;
 }
 
@@ -4065,7 +4160,7 @@ static int rex_http_fetch_socket(const RexUrlParts* parts, RexHttpResponse* out,
   RexStrBuilder req;
   sb_init(&req);
   sb_append_str(&req, "GET ");
-  sb_append_str(&req, parts->path);
+  sb_append_str(&req, parts->request_target ? parts->request_target : "/");
   sb_append_str(&req, " HTTP/1.0\r\nHost: ");
   sb_append_str(&req, parts->host);
   sb_append_str(&req, "\r\nConnection: close\r\n\r\n");
@@ -4227,7 +4322,7 @@ static int rex_http_fetch_openssl(const RexUrlParts* parts, RexHttpResponse* out
   RexStrBuilder req;
   sb_init(&req);
   sb_append_str(&req, "GET ");
-  sb_append_str(&req, parts->path);
+  sb_append_str(&req, parts->request_target ? parts->request_target : "/");
   sb_append_str(&req, " HTTP/1.0\r\nHost: ");
   sb_append_str(&req, parts->host);
   sb_append_str(&req, "\r\nConnection: close\r\n\r\n");
@@ -4339,7 +4434,7 @@ static wchar_t* rex_utf8_to_wide(const char* s) {
 
 static int rex_http_fetch_winhttp(const RexUrlParts* parts, RexHttpResponse* out, const char** err) {
   wchar_t* host_w = rex_utf8_to_wide(parts->host);
-  wchar_t* path_w = rex_utf8_to_wide(parts->path);
+  wchar_t* path_w = rex_utf8_to_wide(parts->request_target ? parts->request_target : "/");
   if (!host_w || !path_w) {
     free(host_w);
     free(path_w);
@@ -4564,7 +4659,11 @@ RexValue rex_http_get_status(RexValue url) {
     return rex_err(rex_str(err ? err : "http error"));
   }
   RexValue map = rex_collections_map_new();
-  rex_collections_map_put(map, rex_str("status"), rex_num((double)resp.status));
+  {
+    char status_buf[32];
+    snprintf(status_buf, sizeof(status_buf), "%d", resp.status);
+    rex_collections_map_put(map, rex_str("status"), rex_str(status_buf));
+  }
   rex_collections_map_put(map, rex_str("body"), rex_str(resp.body ? resp.body : ""));
   free(resp.body);
   return rex_ok(map);
@@ -4589,6 +4688,307 @@ RexValue rex_http_get_json(RexValue url) {
   RexValue text = rex_str(resp.body ? resp.body : "");
   free(resp.body);
   return rex_json_decode(text);
+}
+
+static int rex_url_is_unreserved(unsigned char ch) {
+  return isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~';
+}
+
+static void rex_url_encode_into(RexStrBuilder* sb, const char* text) {
+  const char* src = text ? text : "";
+  while (*src) {
+    unsigned char ch = (unsigned char)*src++;
+    if (rex_url_is_unreserved(ch)) {
+      sb_append_char(sb, (char)ch);
+    } else {
+      char hex[4];
+      snprintf(hex, sizeof(hex), "%%%02X", (unsigned int)ch);
+      sb_append_str(sb, hex);
+    }
+  }
+}
+
+static int rex_url_hex_value(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return 10 + (ch - 'a');
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return 10 + (ch - 'A');
+  }
+  return -1;
+}
+
+static int rex_url_has_default_port(const RexUrlParts* parts) {
+  if (!parts || !parts->port || !parts->scheme) {
+    return 1;
+  }
+  if (strcmp(parts->scheme, "http") == 0 && strcmp(parts->port, "80") == 0) {
+    return 1;
+  }
+  if (strcmp(parts->scheme, "https") == 0 && strcmp(parts->port, "443") == 0) {
+    return 1;
+  }
+  return parts->port[0] == '\0';
+}
+
+static void rex_url_push_map_field(RexValue map, const char* key, const char* value) {
+  rex_collections_map_put(map, rex_str(key), rex_str(value ? value : ""));
+}
+
+RexValue rex_url_parse(RexValue url) {
+  url = rex_resolve(url);
+  if (url.tag != REX_STR) {
+    rex_panic("url.parse expects string");
+    return rex_err(rex_str("bad url"));
+  }
+  RexUrlParts parts = { 0 };
+  const char* err = NULL;
+  if (!rex_url_parse_parts(url.as.str ? url.as.str : "", &parts, &err)) {
+    return rex_err(rex_str(err ? err : "bad url"));
+  }
+  RexValue map = rex_collections_map_new();
+  rex_url_push_map_field(map, "scheme", parts.scheme);
+  rex_url_push_map_field(map, "host", parts.host);
+  rex_url_push_map_field(map, "port", parts.port);
+  rex_url_push_map_field(map, "path", parts.path);
+  rex_url_push_map_field(map, "query", parts.query);
+  rex_url_push_map_field(map, "fragment", parts.fragment);
+  rex_url_push_map_field(map, "request_target", parts.request_target);
+  rex_url_free(&parts);
+  return rex_ok(map);
+}
+
+RexValue rex_url_encode_component(RexValue text) {
+  text = rex_resolve(text);
+  if (text.tag != REX_STR) {
+    rex_panic("url.encode_component expects string");
+    return rex_str("");
+  }
+  RexStrBuilder sb;
+  sb_init(&sb);
+  rex_url_encode_into(&sb, text.as.str ? text.as.str : "");
+  RexValue out = rex_str(sb.data ? sb.data : "");
+  sb_free(&sb);
+  return out;
+}
+
+RexValue rex_url_decode_component(RexValue text) {
+  text = rex_resolve(text);
+  if (text.tag != REX_STR) {
+    rex_panic("url.decode_component expects string");
+    return rex_err(rex_str("bad text"));
+  }
+  const char* src = text.as.str ? text.as.str : "";
+  RexStrBuilder sb;
+  sb_init(&sb);
+  while (*src) {
+    if (*src != '%') {
+      sb_append_char(&sb, *src++);
+      continue;
+    }
+    int hi = rex_url_hex_value(src[1]);
+    int lo = rex_url_hex_value(src[2]);
+    if (src[1] == '\0' || src[2] == '\0' || hi < 0 || lo < 0) {
+      sb_free(&sb);
+      return rex_err(rex_str("bad percent escape"));
+    }
+    sb_append_char(&sb, (char)((hi << 4) | lo));
+    src += 3;
+  }
+  RexValue out = rex_ok(rex_str(sb.data ? sb.data : ""));
+  sb_free(&sb);
+  return out;
+}
+
+RexValue rex_url_join(RexValue base, RexValue part) {
+  base = rex_resolve(base);
+  part = rex_resolve(part);
+  if (base.tag != REX_STR || part.tag != REX_STR) {
+    rex_panic("url.join expects strings");
+    return rex_str("");
+  }
+  const char* base_str = base.as.str ? base.as.str : "";
+  const char* part_str = part.as.str ? part.as.str : "";
+  if (part_str[0] == '\0') {
+    return rex_str(base_str);
+  }
+  if (strstr(part_str, "://")) {
+    return rex_str(part_str);
+  }
+
+  RexUrlParts parts = { 0 };
+  const char* parse_err = NULL;
+  if (rex_url_parse_parts(base_str, &parts, &parse_err)) {
+    const char* current_path = parts.path && parts.path[0] ? parts.path : "/";
+    RexStrBuilder path_sb;
+    RexStrBuilder full_sb;
+    sb_init(&path_sb);
+    sb_init(&full_sb);
+
+    if (part_str[0] == '/') {
+      sb_append_str(&path_sb, part_str);
+    } else {
+      const char* slash = strrchr(current_path, '/');
+      if (slash) {
+        sb_append_bytes(&path_sb, current_path, (int)(slash - current_path + 1));
+      } else {
+        sb_append_char(&path_sb, '/');
+      }
+      sb_append_str(&path_sb, part_str);
+    }
+
+    sb_append_str(&full_sb, parts.scheme ? parts.scheme : "");
+    sb_append_str(&full_sb, "://");
+    sb_append_str(&full_sb, parts.host ? parts.host : "");
+    if (!rex_url_has_default_port(&parts)) {
+      sb_append_char(&full_sb, ':');
+      sb_append_str(&full_sb, parts.port);
+    }
+    sb_append_str(&full_sb, path_sb.data ? path_sb.data : "/");
+
+    RexValue out = rex_str(full_sb.data ? full_sb.data : "");
+    sb_free(&path_sb);
+    sb_free(&full_sb);
+    rex_url_free(&parts);
+    return out;
+  }
+
+  size_t base_len = strlen(base_str);
+  int base_has_slash = base_len > 0 && base_str[base_len - 1] == '/';
+  int part_has_slash = part_str[0] == '/';
+  RexStrBuilder sb;
+  sb_init(&sb);
+  sb_append_str(&sb, base_str);
+  if (base_has_slash && part_has_slash) {
+    sb_append_str(&sb, part_str + 1);
+  } else if (!base_has_slash && !part_has_slash) {
+    sb_append_char(&sb, '/');
+    sb_append_str(&sb, part_str);
+  } else {
+    sb_append_str(&sb, part_str);
+  }
+  RexValue out = rex_str(sb.data ? sb.data : "");
+  sb_free(&sb);
+  return out;
+}
+
+RexValue rex_url_with_query(RexValue base, RexValue params) {
+  base = rex_resolve(base);
+  params = rex_resolve(params);
+  if (base.tag != REX_STR) {
+    rex_panic("url.with_query expects string base");
+    return rex_str("");
+  }
+  if (params.tag != REX_MAP || !params.as.ptr) {
+    rex_panic("url.with_query expects map");
+    return rex_str(base.as.str ? base.as.str : "");
+  }
+
+  const char* base_str = base.as.str ? base.as.str : "";
+  const char* fragment = strchr(base_str, '#');
+  const char* prefix_end = fragment ? fragment : (base_str + strlen(base_str));
+  const char* query = memchr(base_str, '?', (size_t)(prefix_end - base_str));
+  if (query) {
+    prefix_end = query;
+  }
+
+  RexStrBuilder sb;
+  sb_init(&sb);
+  sb_append_bytes(&sb, base_str, (int)(prefix_end - base_str));
+
+  RexMap* map = (RexMap*)params.as.ptr;
+  if (map->count > 0) {
+    sb_append_char(&sb, '?');
+    for (int i = 0; i < map->count; ++i) {
+      if (i > 0) {
+        sb_append_char(&sb, '&');
+      }
+      rex_url_encode_into(&sb, rex_to_cstr(map->items[i].key));
+      sb_append_char(&sb, '=');
+      rex_url_encode_into(&sb, rex_to_cstr(map->items[i].value));
+    }
+  }
+  if (fragment) {
+    sb_append_str(&sb, fragment);
+  }
+
+  RexValue out = rex_str(sb.data ? sb.data : "");
+  sb_free(&sb);
+  return out;
+}
+
+static int rex_process_exit_code(int status) {
+#ifdef _WIN32
+  return status;
+#else
+  if (status == -1) {
+    return -1;
+  }
+  if (WIFEXITED(status)) {
+    return WEXITSTATUS(status);
+  }
+  if (WIFSIGNALED(status)) {
+    return 128 + WTERMSIG(status);
+  }
+  return status;
+#endif
+}
+
+RexValue rex_process_run(RexValue command) {
+  command = rex_resolve(command);
+  if (command.tag != REX_STR) {
+    rex_panic("process.run expects string");
+    return rex_err(rex_str("bad command"));
+  }
+  int status = system(command.as.str ? command.as.str : "");
+  if (status == -1) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+  return rex_ok(rex_num((double)rex_process_exit_code(status)));
+}
+
+RexValue rex_process_capture(RexValue command) {
+  command = rex_resolve(command);
+  if (command.tag != REX_STR) {
+    rex_panic("process.capture expects string");
+    return rex_err(rex_str("bad command"));
+  }
+
+#ifdef _WIN32
+  FILE* pipe = _popen(command.as.str ? command.as.str : "", "r");
+#else
+  FILE* pipe = popen(command.as.str ? command.as.str : "", "r");
+#endif
+  if (!pipe) {
+    return rex_err(rex_str(strerror(errno)));
+  }
+
+  RexStrBuilder sb;
+  sb_init(&sb);
+  char buf[4096];
+  while (fgets(buf, sizeof(buf), pipe)) {
+    sb_append_str(&sb, buf);
+  }
+
+#ifdef _WIN32
+  int status = _pclose(pipe);
+#else
+  int status = pclose(pipe);
+#endif
+  if (status == -1) {
+    sb_free(&sb);
+    return rex_err(rex_str(strerror(errno)));
+  }
+
+  RexValue values[2];
+  values[0] = rex_num((double)rex_process_exit_code(status));
+  values[1] = rex_str(sb.data ? sb.data : "");
+  RexValue out = rex_ok(rex_tuple_new(2, values));
+  sb_free(&sb);
+  return out;
 }
 
 
