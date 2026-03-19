@@ -21,7 +21,7 @@ if defined INNO_PORTABLE_URL (
     echo [ERROR] Invalid URL placeholder detected: %INNO_PORTABLE_URL%
     echo [INFO] Use a real URL ^(not https://...^).
     echo [INFO] Example:
-    echo        tools\install\windows\build-installer.bat "C:\lua\lua.exe" 0.5.1 "https://example.com/innosetup-6.7.0-portable.zip"
+    echo        tools\install\windows\build-installer.bat "C:\lua\lua.exe" 0.6.1 "https://example.com/innosetup-6.7.0-portable.zip"
     exit /b 1
   )
 )
@@ -41,7 +41,11 @@ if not exist "%ISCC%" (
   exit /b 1
 )
 
-set "APP_VERSION=0.5.1"
+set "APP_VERSION="
+if exist "%REPO_ROOT%\rex\VERSION" (
+  set /p APP_VERSION=<"%REPO_ROOT%\rex\VERSION"
+)
+if not defined APP_VERSION set "APP_VERSION=0.6.1"
 if not "%~2"=="" set "APP_VERSION=%~2"
 
 set "LUA_EXE="

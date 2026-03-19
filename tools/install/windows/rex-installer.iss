@@ -3,7 +3,7 @@
 #endif
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.5.1"
+  #define MyAppVersion "0.6.1"
 #endif
 
 #define MyAppName "Rex Language"
@@ -56,6 +56,7 @@ Name: "desktopicon"; Description: "Create desktop shortcut"; GroupDescription: "
 Source: "{#RepoRoot}\rex\compiler\*"; DestDir: "{app}\rex\compiler"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#RepoRoot}\rex\runtime_c\*"; DestDir: "{app}\rex\runtime_c"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#RepoRoot}\rex\examples\*"; DestDir: "{app}\rex\examples"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#RepoRoot}\rex\VERSION"; DestDir: "{app}\rex"; Flags: ignoreversion
 Source: "{#RepoRoot}\rex.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\tools\install\windows\rex.ico"; DestDir: "{app}"; Flags: ignoreversion
 #ifdef LuaExe

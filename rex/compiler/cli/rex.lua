@@ -7,10 +7,8 @@ local Parser = require("compiler.parser")
 local Codegen = require("compiler.codegen")
 local Typechecker = require("compiler.typechecker")
 
-local REX_VERSION = "0.5.1"
+local DEFAULT_REX_VERSION = "0.6.1"
 local DEFAULT_PROJECT_VERSION = "0.1.0"
-local UPDATE_API_URL = "https://api.github.com/repos/0xh7/rex-lang/releases/latest"
-local UPDATE_RELEASES_URL = "https://github.com/0xh7/rex-lang/releases"
 
 local function read_file(path)
   local f, err = io.open(path, "rb")
@@ -115,6 +113,42 @@ local function normalize_path(path)
   local normalized = (path or ""):gsub("\\", "/")
   return normalized
 end
+
+local function resolve_cli_script_path()
+  local source = debug.getinfo(1, "S").source or ""
+  if source:sub(1, 1) == "@" then
+    source = source:sub(2)
+  end
+  if source == "" and arg and arg[0] then
+    source = arg[0]
+  end
+  return source
+end
+
+local function load_rex_version()
+  local script_path = resolve_cli_script_path()
+  local script_dir = split_dir(script_path)
+  if not script_dir then
+    return DEFAULT_REX_VERSION
+  end
+  local rex_root = parent_dir(parent_dir(normalize_path(script_dir)))
+  if not rex_root then
+    return DEFAULT_REX_VERSION
+  end
+  local raw = read_file(join_path(rex_root, "VERSION"))
+  if not raw then
+    return DEFAULT_REX_VERSION
+  end
+  local version = tostring(raw):gsub("%s+$", "")
+  if version == "" then
+    return DEFAULT_REX_VERSION
+  end
+  return version
+end
+
+local REX_VERSION = load_rex_version()
+local UPDATE_API_URL = "https://api.github.com/repos/0xh7/Rex-language/releases/latest"
+local UPDATE_RELEASES_URL = "https://github.com/0xh7/Rex-language/releases"
 
 local function clean_path(path)
   local normalized = normalize_path(path or "")
@@ -1647,6 +1681,7 @@ local function usage()
   print("  rex lint [input]")
   print("  rex check [input]")
   print("  rex version")
+  print("  rex v")
   print("  rex check-update")
   print("  note: native build/run need a C compiler (clang, gcc, or zig cc)")
   print("  env: REX_BUILD_DIR=<writable path> (optional)")
@@ -1904,7 +1939,7 @@ elseif cmd == "check" then
     external_modules = prepared.external_modules,
   })
   print("OK " .. input)
-elseif cmd == "version" or cmd == "--version" or cmd == "-v" then
+elseif cmd == "version" or cmd == "v" or cmd == "--version" or cmd == "-v" then
   print_version()
 elseif cmd == "check-update" then
   cmd_check_update()

@@ -256,6 +256,7 @@ Print the Rex CLI release version.
 
 ```bash
 rex version
+rex v
 rex --version
 ```
 

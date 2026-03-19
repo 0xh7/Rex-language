@@ -25,7 +25,7 @@
   ·
   <a href="https://0xh7.com/projects/rex/book">Book</a>
   ·
-  <a href="https://github.com/0xh7/rex-lang/releases">Releases</a>
+  <a href="https://github.com/0xh7/Rex-language/releases">Releases</a>
 </p>
 
 ![Rex repository overview](./docs/assets/readme-overview.svg)
